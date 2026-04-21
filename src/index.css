@@ -1,0 +1,102 @@
+@import 'leaflet/dist/leaflet.css';
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root,
+.dark {
+  --color-primary: 265 45% 56%;
+  --color-dark: 258 24% 12%;
+  --color-surface: 270 22% 18%;
+  --color-muted: 273 10% 68%;
+}
+
+.light {
+  --color-primary: 262 62% 56%;
+  /* Off-white page + surfaces (not pure white — easier on the eyes) */
+  --color-dark: 220 16% 92%;
+  --color-surface: 220 14% 97%;
+  --color-muted: 220 18% 30%;
+}
+
+html {
+  scrollbar-gutter: stable;
+}
+
+body {
+  background-color: hsl(var(--color-dark));
+  color: hsl(var(--color-muted));
+  transition: background-color 220ms ease, color 220ms ease;
+}
+
+.light .text-white {
+  color: #111827 !important;
+}
+
+.light .text-muted {
+  color: #374151 !important;
+}
+
+.light .bg-black\/80,
+.light .bg-black\/85,
+.light .bg-black\/60 {
+  background-color: rgba(17, 24, 39, 0.55) !important;
+}
+
+.light .bg-dark\/50,
+.light .bg-dark\/60,
+.light .bg-dark\/80 {
+  background-color: rgba(228, 231, 236, 0.92) !important;
+}
+
+/* Food menu: 4 columns on desktop / fine pointer; 2 columns on touch phones only */
+.mx-menu-grid {
+  display: grid;
+  gap: 0.875rem;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+@media (max-width: 768px) and (pointer: coarse) {
+  .mx-menu-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (min-width: 769px) {
+  .mx-menu-grid {
+    gap: 1.5rem;
+  }
+}
+
+/* Desktop-style item cards: full-bleed image + bottom overlay (not on touch phones) */
+@media not all and (max-width: 768px) and (pointer: coarse) {
+  .mx-menu-item .mx-menu-item-btn {
+    position: relative;
+    display: block;
+    min-height: 15.5rem;
+  }
+  .mx-menu-item .mx-menu-hero {
+    position: absolute;
+    inset: 0;
+    aspect-ratio: auto;
+    min-height: 100%;
+    width: 100%;
+  }
+  .mx-menu-item .mx-menu-meta {
+    position: absolute;
+    inset-inline: 0;
+    bottom: 0;
+    border-top-width: 0;
+    background: linear-gradient(
+      to top,
+      rgba(8, 4, 18, 0.97) 0%,
+      rgba(8, 4, 18, 0.78) 40%,
+      rgba(8, 4, 18, 0.28) 72%,
+      transparent 100%
+    );
+    padding-top: 2.25rem;
+  }
+}
+
+/* Keep light text on intentional dark photo surfaces (menu cards, item modal) */
+.light .dark-surface-ignore-theme .text-white {
+  color: #f8fafc !important;
+}
