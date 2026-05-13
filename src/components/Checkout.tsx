@@ -883,7 +883,7 @@ export default function Checkout({
       return;
     }
     if ((!deliveryServices || deliveryServices.length === 0) && (!allZones || allZones.length === 0)) {
-      setIsInDeliveryZone(false);
+      setIsInDeliveryZone(true);
       setDeliveryFee(0);
       setSelectedServiceInfo(null);
       return;
