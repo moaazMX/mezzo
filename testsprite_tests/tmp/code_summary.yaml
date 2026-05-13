@@ -1,0 +1,156 @@
+version: "2"
+type: frontend
+tech_stack:
+  - TypeScript
+  - React
+  - Tailwind CSS
+  - Supabase
+  - Vite
+  - React Leaflet
+routes:
+  - path: /
+    file: src/App.tsx
+    auth_required: false
+    description: Customer storefront for browsing menu, managing cart, checkout, and account/profile access.
+  - path: /operator
+    file: src/App.tsx
+    auth_required: true
+    description: Operator portal entry point that shows login or dashboard based on operator authentication state.
+features:
+  - name: Menu browsing and cart management
+    description: Customers browse categories/items, add products to cart, and adjust quantities before checkout.
+    files:
+      - src/App.tsx
+      - src/components/CategorySection.tsx
+      - src/components/Cart.tsx
+      - src/components/MenuItem.tsx
+    entry_route: /
+    user_interactions:
+      - Browse categories and menu items on the main page.
+      - Tap add-to-cart on products.
+      - Increase, decrease, or remove cart quantities.
+      - Open and close the cart panel.
+    api_calls:
+      - method: SELECT
+        endpoint: supabase:categories
+      - method: SELECT
+        endpoint: supabase:items
+  - name: Checkout and order creation
+    description: Customers provide delivery/pickup details, apply coupons, and submit orders with payment method.
+    files:
+      - src/App.tsx
+      - src/components/Checkout.tsx
+      - src/lib/deliveryMatch.ts
+      - src/lib/addressSync.ts
+    entry_route: /
+    user_interactions:
+      - Open checkout from cart.
+      - Enter phone and customer/address details.
+      - Select delivery method and map location if needed.
+      - Confirm order and view success modal with order number.
+    api_calls:
+      - method: SELECT
+        endpoint: supabase:customers
+      - method: INSERT
+        endpoint: supabase:customers
+      - method: UPDATE
+        endpoint: supabase:customers
+      - method: INSERT
+        endpoint: supabase:orders
+      - method: INSERT
+        endpoint: supabase:order_items
+      - method: SELECT
+        endpoint: supabase:delivery_zones
+      - method: SELECT
+        endpoint: supabase:delivery_services
+      - method: SELECT
+        endpoint: supabase:delivery_zone_layers
+  - name: Customer profile and order tracking
+    description: Customers can access account/profile data and track active order status from the storefront.
+    files:
+      - src/App.tsx
+      - src/components/CustomerProfile.tsx
+    entry_route: /
+    user_interactions:
+      - Open account/profile panel.
+      - View settings and order history tabs.
+      - Navigate to highlighted active orders from the pending banner.
+      - Validate phone-linked account data.
+    api_calls:
+      - method: SELECT
+        endpoint: supabase:customers
+      - method: SELECT
+        endpoint: supabase:orders
+      - method: SELECT
+        endpoint: supabase:order_items
+  - name: Coupon unlock and apply flow
+    description: Customers can unlock coupons and apply eligible coupons during checkout.
+    files:
+      - src/components/CheatCodeInput.tsx
+      - src/App.tsx
+      - src/components/Checkout.tsx
+      - src/components/operator/SettingsPanel.tsx
+    entry_route: /
+    user_interactions:
+      - Enter a cheat code to unlock a coupon.
+      - Review available coupons during checkout.
+      - Apply a coupon before confirming order.
+      - See coupon validation errors if invalid or expired.
+    api_calls:
+      - method: SELECT
+        endpoint: supabase:settings
+      - method: SELECT
+        endpoint: supabase:device_coupons
+      - method: INSERT
+        endpoint: supabase:device_coupons
+      - method: UPDATE
+        endpoint: supabase:device_coupons
+      - method: DELETE
+        endpoint: supabase:device_coupons
+  - name: Operator management dashboard
+    description: Authenticated operators manage orders, items, categories, analytics, settings, and delivery configuration.
+    files:
+      - src/App.tsx
+      - src/components/OperatorLogin.tsx
+      - src/components/OperatorDashboard.tsx
+      - src/components/operator/OrdersManagement.tsx
+      - src/components/operator/ItemsManagement.tsx
+      - src/components/operator/Analytics.tsx
+      - src/components/operator/SettingsPanel.tsx
+    entry_route: /operator
+    user_interactions:
+      - Open operator route and authenticate.
+      - Review and update live/archived orders.
+      - Create/edit/delete categories and items.
+      - Manage settings, delivery zones, and service layers.
+    api_calls:
+      - method: SELECT
+        endpoint: supabase:orders
+      - method: UPDATE
+        endpoint: supabase:orders
+      - method: SELECT
+        endpoint: supabase:archive_orders
+      - method: SELECT
+        endpoint: supabase:items
+      - method: INSERT
+        endpoint: supabase:items
+      - method: UPDATE
+        endpoint: supabase:items
+      - method: DELETE
+        endpoint: supabase:items
+      - method: SELECT
+        endpoint: supabase:categories
+      - method: INSERT
+        endpoint: supabase:categories
+      - method: UPDATE
+        endpoint: supabase:categories
+      - method: DELETE
+        endpoint: supabase:categories
+      - method: SELECT
+        endpoint: supabase:settings
+      - method: UPDATE
+        endpoint: supabase:settings
+known_limitations:
+  - issue: Routing is handled with direct pathname checks instead of a dedicated router, limiting route scalability.
+    location: src/App.tsx
+    impact: Adding nested routes, route guards, and route-level code splitting is harder to maintain.

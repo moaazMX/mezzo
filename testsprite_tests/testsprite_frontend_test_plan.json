@@ -1,0 +1,775 @@
+[
+  {
+    "id": "TC001",
+    "title": "Start checkout with delivery details and place an order",
+    "description": "This test verifies that a customer can complete checkout with delivery details and see a success modal with an order number.",
+    "category": "Checkout and order creation",
+    "steps": [
+      {
+        "type": "action",
+        "description": "Navigate to /"
+      },
+      {
+        "type": "action",
+        "description": "Add at least one product to the cart"
+      },
+      {
+        "type": "action",
+        "description": "Open the cart panel"
+      },
+      {
+        "type": "action",
+        "description": "Start checkout"
+      },
+      {
+        "type": "action",
+        "description": "Fill in the phone field with a valid phone number"
+      },
+      {
+        "type": "action",
+        "description": "Fill in the customer details with a valid customer name"
+      },
+      {
+        "type": "action",
+        "description": "Fill in the delivery address with a valid address"
+      },
+      {
+        "type": "action",
+        "description": "Select delivery as the fulfillment method"
+      },
+      {
+        "type": "action",
+        "description": "Confirm the order"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify a success confirmation is visible"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify an order number is displayed"
+      }
+    ],
+    "priority": "High"
+  },
+  {
+    "id": "TC002",
+    "title": "Browse menu and add a product to the cart",
+    "description": "This test verifies that a customer can browse the storefront menu and add a product to the cart, resulting in the item appearing in the cart.",
+    "category": "Menu browsing and cart management",
+    "steps": [
+      {
+        "type": "action",
+        "description": "Navigate to /"
+      },
+      {
+        "type": "action",
+        "description": "Browse the available categories and menu items"
+      },
+      {
+        "type": "action",
+        "description": "Add a product to the cart"
+      },
+      {
+        "type": "action",
+        "description": "Open the cart panel"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify the selected item is shown in the cart"
+      }
+    ],
+    "priority": "High"
+  },
+  {
+    "id": "TC003",
+    "title": "Open the operator portal login gate",
+    "description": "This verifies that visiting the operator area presents the authentication gate before access to management tools.",
+    "category": "Operator management dashboard",
+    "steps": [
+      {
+        "type": "action",
+        "description": "Navigate to /operator"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify an operator login prompt is visible"
+      }
+    ],
+    "priority": "High"
+  },
+  {
+    "id": "TC004",
+    "title": "Sign in to the operator portal and view live orders",
+    "description": "This test verifies that an operator can log in to the operator portal and reach the live orders dashboard.",
+    "category": "Menu browsing and cart management",
+    "steps": [
+      {
+        "type": "action",
+        "description": "Navigate to /operator"
+      },
+      {
+        "type": "action",
+        "description": "Fill in the operator username with {{LOGIN_USER}}"
+      },
+      {
+        "type": "action",
+        "description": "Fill in the operator password with {{LOGIN_PASSWORD}}"
+      },
+      {
+        "type": "action",
+        "description": "Submit the login form"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify the operator dashboard is displayed"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify live orders are displayed"
+      }
+    ],
+    "priority": "High"
+  },
+  {
+    "id": "TC005",
+    "title": "Open a highlighted active order from the pending banner",
+    "description": "This test verifies that a customer can follow the pending order banner to the active order tracking view and see the current status.",
+    "category": "Customer profile and order tracking",
+    "steps": [
+      {
+        "type": "action",
+        "description": "Navigate to /"
+      },
+      {
+        "type": "action",
+        "description": "Open the pending order banner"
+      },
+      {
+        "type": "action",
+        "description": "Navigate to the highlighted active order"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify the active order tracking view is displayed"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify the current order status is displayed"
+      }
+    ],
+    "priority": "High"
+  },
+  {
+    "id": "TC006",
+    "title": "Keep shopping after adding multiple items",
+    "description": "This test verifies that a customer can add multiple products and continue browsing while the cart contents remain retained.",
+    "category": "Menu browsing and cart management",
+    "steps": [
+      {
+        "type": "action",
+        "description": "Navigate to /"
+      },
+      {
+        "type": "action",
+        "description": "Browse the available categories and menu items"
+      },
+      {
+        "type": "action",
+        "description": "Add the first product to the cart"
+      },
+      {
+        "type": "action",
+        "description": "Add a second product to the cart"
+      },
+      {
+        "type": "action",
+        "description": "Close the cart panel"
+      },
+      {
+        "type": "action",
+        "description": "Continue browsing the menu"
+      },
+      {
+        "type": "action",
+        "description": "Reopen the cart panel"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify both selected items are still shown in the cart"
+      }
+    ],
+    "priority": "High"
+  },
+  {
+    "id": "TC007",
+    "title": "Update an order status from the operator portal",
+    "description": "This test verifies that an operator can open a live order and change its status from the operator portal.",
+    "category": "Menu browsing and cart management",
+    "steps": [
+      {
+        "type": "action",
+        "description": "Navigate to /operator"
+      },
+      {
+        "type": "action",
+        "description": "Fill in the operator username with {{LOGIN_USER}}"
+      },
+      {
+        "type": "action",
+        "description": "Fill in the operator password with {{LOGIN_PASSWORD}}"
+      },
+      {
+        "type": "action",
+        "description": "Submit the login form"
+      },
+      {
+        "type": "action",
+        "description": "Open a live order"
+      },
+      {
+        "type": "action",
+        "description": "Change the order status"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify the updated order status is displayed"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify the order appears in the completed or archived history when applicable"
+      }
+    ],
+    "priority": "High"
+  },
+  {
+    "id": "TC008",
+    "title": "Review and update a live order as an operator",
+    "description": "This verifies that an authenticated operator can open live orders, change an order status, and see the updated order reflected in the dashboard.",
+    "category": "Operator management dashboard",
+    "steps": [
+      {
+        "type": "action",
+        "description": "Navigate to /operator"
+      },
+      {
+        "type": "action",
+        "description": "Fill in the operator credentials with {{LOGIN_USER}}"
+      },
+      {
+        "type": "action",
+        "description": "Submit the login form"
+      },
+      {
+        "type": "action",
+        "description": "Open the orders view"
+      },
+      {
+        "type": "action",
+        "description": "Review the live orders"
+      },
+      {
+        "type": "action",
+        "description": "Update an order status"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify the updated order status is visible"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify the live orders view remains accessible"
+      }
+    ],
+    "priority": "High"
+  },
+  {
+    "id": "TC009",
+    "title": "Place an order with pickup instead of delivery",
+    "description": "This test verifies that a customer can complete checkout using pickup and receive a successful order confirmation.",
+    "category": "Checkout and order creation",
+    "steps": [
+      {
+        "type": "action",
+        "description": "Navigate to /"
+      },
+      {
+        "type": "action",
+        "description": "Add at least one product to the cart"
+      },
+      {
+        "type": "action",
+        "description": "Open the cart panel"
+      },
+      {
+        "type": "action",
+        "description": "Start checkout"
+      },
+      {
+        "type": "action",
+        "description": "Fill in the phone field with a valid phone number"
+      },
+      {
+        "type": "action",
+        "description": "Fill in the customer details with a valid customer name"
+      },
+      {
+        "type": "action",
+        "description": "Select pickup as the fulfillment method"
+      },
+      {
+        "type": "action",
+        "description": "Confirm the order"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify a success confirmation is visible"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify an order number is displayed"
+      }
+    ],
+    "priority": "High"
+  },
+  {
+    "id": "TC010",
+    "title": "Adjust cart quantities and remove an item",
+    "description": "This test verifies that a customer can increase or decrease item quantities and remove an item from the cart before checkout.",
+    "category": "Menu browsing and cart management",
+    "steps": [
+      {
+        "type": "action",
+        "description": "Navigate to /"
+      },
+      {
+        "type": "action",
+        "description": "Browse the available categories and menu items"
+      },
+      {
+        "type": "action",
+        "description": "Add a product to the cart"
+      },
+      {
+        "type": "action",
+        "description": "Open the cart panel"
+      },
+      {
+        "type": "action",
+        "description": "Increase the item quantity"
+      },
+      {
+        "type": "action",
+        "description": "Decrease the item quantity"
+      },
+      {
+        "type": "action",
+        "description": "Remove the item from the cart"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify the cart is empty"
+      }
+    ],
+    "priority": "High"
+  },
+  {
+    "id": "TC011",
+    "title": "Open account settings and review order history",
+    "description": "This test verifies that a customer can open the account area, view settings, and switch to order history.",
+    "category": "Customer profile and order tracking",
+    "steps": [
+      {
+        "type": "action",
+        "description": "Navigate to /"
+      },
+      {
+        "type": "action",
+        "description": "Open the account or profile panel"
+      },
+      {
+        "type": "action",
+        "description": "View the account settings section"
+      },
+      {
+        "type": "action",
+        "description": "Switch to the order history view"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify account information is displayed"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify order history is displayed"
+      }
+    ],
+    "priority": "High"
+  },
+  {
+    "id": "TC012",
+    "title": "Create, edit, and delete a menu item as an operator",
+    "description": "This verifies that an authenticated operator can manage items by creating, updating, and removing a menu item successfully.",
+    "category": "Operator management dashboard",
+    "steps": [
+      {
+        "type": "action",
+        "description": "Navigate to /operator"
+      },
+      {
+        "type": "action",
+        "description": "Fill in the operator credentials with {{LOGIN_USER}}"
+      },
+      {
+        "type": "action",
+        "description": "Submit the login form"
+      },
+      {
+        "type": "action",
+        "description": "Open the items management view"
+      },
+      {
+        "type": "action",
+        "description": "Create a new menu item"
+      },
+      {
+        "type": "action",
+        "description": "Edit the newly created menu item"
+      },
+      {
+        "type": "action",
+        "description": "Delete the newly created menu item"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify the menu item is no longer displayed"
+      }
+    ],
+    "priority": "High"
+  },
+  {
+    "id": "TC013",
+    "title": "Create, edit, and delete a menu category as an operator",
+    "description": "This verifies that an authenticated operator can manage categories from creation through deletion in the menu management area.",
+    "category": "Operator management dashboard",
+    "steps": [
+      {
+        "type": "action",
+        "description": "Navigate to /operator"
+      },
+      {
+        "type": "action",
+        "description": "Fill in the operator credentials with {{LOGIN_USER}}"
+      },
+      {
+        "type": "action",
+        "description": "Submit the login form"
+      },
+      {
+        "type": "action",
+        "description": "Open the categories management view"
+      },
+      {
+        "type": "action",
+        "description": "Create a new category"
+      },
+      {
+        "type": "action",
+        "description": "Edit the newly created category"
+      },
+      {
+        "type": "action",
+        "description": "Delete the newly created category"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify the category is no longer displayed"
+      }
+    ],
+    "priority": "High"
+  },
+  {
+    "id": "TC014",
+    "title": "Create a menu item in the operator portal",
+    "description": "This test verifies that an operator can create a new menu item and see it in the item list.",
+    "category": "Menu browsing and cart management",
+    "steps": [
+      {
+        "type": "action",
+        "description": "Navigate to /operator"
+      },
+      {
+        "type": "action",
+        "description": "Fill in the operator username with {{LOGIN_USER}}"
+      },
+      {
+        "type": "action",
+        "description": "Fill in the operator password with {{LOGIN_PASSWORD}}"
+      },
+      {
+        "type": "action",
+        "description": "Submit the login form"
+      },
+      {
+        "type": "action",
+        "description": "Open the item management view"
+      },
+      {
+        "type": "action",
+        "description": "Create a new item with valid details"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify the new item is displayed in the item list"
+      }
+    ],
+    "priority": "High"
+  },
+  {
+    "id": "TC015",
+    "title": "Create a menu category in the operator portal",
+    "description": "This test verifies that an operator can create a new menu category and see it in the category list.",
+    "category": "Menu browsing and cart management",
+    "steps": [
+      {
+        "type": "action",
+        "description": "Navigate to /operator"
+      },
+      {
+        "type": "action",
+        "description": "Fill in the operator username with {{LOGIN_USER}}"
+      },
+      {
+        "type": "action",
+        "description": "Fill in the operator password with {{LOGIN_PASSWORD}}"
+      },
+      {
+        "type": "action",
+        "description": "Submit the login form"
+      },
+      {
+        "type": "action",
+        "description": "Open the category management view"
+      },
+      {
+        "type": "action",
+        "description": "Create a new category with a valid name"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify the new category is displayed in the category list"
+      }
+    ],
+    "priority": "Medium"
+  },
+  {
+    "id": "TC016",
+    "title": "Update delivery settings as an operator",
+    "description": "This verifies that an authenticated operator can review delivery configuration, make a change, and save the updated settings.",
+    "category": "Operator management dashboard",
+    "steps": [
+      {
+        "type": "action",
+        "description": "Navigate to /operator"
+      },
+      {
+        "type": "action",
+        "description": "Fill in the operator credentials with {{LOGIN_USER}}"
+      },
+      {
+        "type": "action",
+        "description": "Submit the login form"
+      },
+      {
+        "type": "action",
+        "description": "Open the settings and delivery configuration view"
+      },
+      {
+        "type": "action",
+        "description": "Review the current delivery settings"
+      },
+      {
+        "type": "action",
+        "description": "Update a delivery zone or service layer setting"
+      },
+      {
+        "type": "action",
+        "description": "Save the changes"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify the updated settings are visible"
+      }
+    ],
+    "priority": "Medium"
+  },
+  {
+    "id": "TC017",
+    "title": "Match a linked account using phone details",
+    "description": "This test verifies that a returning customer can enter phone details and see matched account data in the profile area.",
+    "category": "Customer profile and order tracking",
+    "steps": [
+      {
+        "type": "action",
+        "description": "Navigate to /"
+      },
+      {
+        "type": "action",
+        "description": "Open the account or profile panel"
+      },
+      {
+        "type": "action",
+        "description": "Enter a linked phone number"
+      },
+      {
+        "type": "action",
+        "description": "Confirm the phone details"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify matched account data is displayed"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify linked customer information is displayed"
+      }
+    ],
+    "priority": "Medium"
+  },
+  {
+    "id": "TC018",
+    "title": "Unlock a coupon and apply it during checkout",
+    "description": "This verifies that a customer can unlock an eligible coupon with a cheat code, select it in checkout, and proceed with the order using the applied discount.",
+    "category": "Coupon unlock and apply flow",
+    "steps": [
+      {
+        "type": "action",
+        "description": "Navigate to /"
+      },
+      {
+        "type": "action",
+        "description": "Enter a valid cheat code to unlock a coupon"
+      },
+      {
+        "type": "action",
+        "description": "Open the checkout flow"
+      },
+      {
+        "type": "action",
+        "description": "Review the available coupons"
+      },
+      {
+        "type": "action",
+        "description": "Apply an eligible coupon"
+      },
+      {
+        "type": "action",
+        "description": "Confirm the order"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify a success confirmation is visible"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify order details are displayed"
+      }
+    ],
+    "priority": "Medium"
+  },
+  {
+    "id": "TC019",
+    "title": "Review archived orders as an operator",
+    "description": "This verifies that an authenticated operator can switch to archived orders and review completed order history.",
+    "category": "Operator management dashboard",
+    "steps": [
+      {
+        "type": "action",
+        "description": "Navigate to /operator"
+      },
+      {
+        "type": "action",
+        "description": "Fill in the operator credentials with {{LOGIN_USER}}"
+      },
+      {
+        "type": "action",
+        "description": "Submit the login form"
+      },
+      {
+        "type": "action",
+        "description": "Open the archived orders view"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify archived orders are displayed"
+      }
+    ],
+    "priority": "Medium"
+  },
+  {
+    "id": "TC020",
+    "title": "Review archived completed orders in the operator portal",
+    "description": "This test verifies that an operator can access the archived or completed order history after logging in.",
+    "category": "Menu browsing and cart management",
+    "steps": [
+      {
+        "type": "action",
+        "description": "Navigate to /operator"
+      },
+      {
+        "type": "action",
+        "description": "Fill in the operator username with {{LOGIN_USER}}"
+      },
+      {
+        "type": "action",
+        "description": "Fill in the operator password with {{LOGIN_PASSWORD}}"
+      },
+      {
+        "type": "action",
+        "description": "Submit the login form"
+      },
+      {
+        "type": "action",
+        "description": "Open the archived orders view"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify archived orders are displayed"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify completed order history is displayed"
+      }
+    ],
+    "priority": "Medium"
+  },
+  {
+    "id": "TC021",
+    "title": "Show a coupon validation error for an invalid coupon",
+    "description": "This verifies that checkout prevents applying an invalid or expired coupon and shows a validation error to the customer.",
+    "category": "Coupon unlock and apply flow",
+    "steps": [
+      {
+        "type": "action",
+        "description": "Navigate to /"
+      },
+      {
+        "type": "action",
+        "description": "Open the checkout flow"
+      },
+      {
+        "type": "action",
+        "description": "Review the available coupons"
+      },
+      {
+        "type": "action",
+        "description": "Try to apply an invalid or expired coupon"
+      },
+      {
+        "type": "assertion",
+        "description": "Verify a coupon validation error is visible"
+      }
+    ],
+    "priority": "Low"
+  }
+]

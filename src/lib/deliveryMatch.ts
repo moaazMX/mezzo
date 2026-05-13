@@ -55,8 +55,6 @@ export function getDeliveryMatch(
     });
   }
 
-  const layersDisabled = services.length === 0 || services.every(s => !s.layers || s.layers.length === 0);
-
   if (isInYellow && bestLayerMatch) {
     const match = bestLayerMatch as { service: DeliveryService; layer: DeliveryZoneLayer; price: number; order: number };
     return {
@@ -70,38 +68,11 @@ export function getDeliveryMatch(
   }
 
   if (matchedGreenZone) {
-    // If layers are disabled, delivery is free even inside a green zone
-    if (layersDisabled) {
-      return {
-        isInGreen: true,
-        isInYellow: false,
-        price: 0,
-        activeZone: matchedGreenZone
-      };
-    }
     return {
       isInGreen: true,
       isInYellow: false,
       price: Number(matchedGreenZone.base_delivery_price || 0),
       activeZone: matchedGreenZone
-    };
-  }
-
-  // Requirement: If zones are disabled (empty array) and point is outside layers, it's free
-  if (zones.length === 0) {
-    return {
-      isInGreen: true,
-      isInYellow: false,
-      price: 0
-    };
-  }
-
-  // Requirement: If layers are disabled (empty services/layers) and point is outside green zones, it's free
-  if (layersDisabled) {
-    return {
-      isInGreen: true,
-      isInYellow: false,
-      price: 0
     };
   }
 

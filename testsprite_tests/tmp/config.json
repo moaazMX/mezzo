@@ -1,0 +1,18 @@
+{
+  "status": "commited",
+  "type": "frontend",
+  "scope": "codebase",
+  "localEndpoint": "http://localhost:5173",
+  "loginUser": "moaazMXpl011#",
+  "executionArgs": {
+    "projectName": "MX - Copy",
+    "projectPath": "D:\\IMPORTANT\\my projects\\MX - Copy",
+    "testIds": [],
+    "additionalInstruction": "OPERATOR MODE ACCESS:\n- There is a lock icon in the app to access Operator Dashboard.\n- Operator password is: moaazMXpl011#.\n\nCHEAT CODES SYSTEM:\n- Cheat codes are NOT activated by clicking the logo.\n- The user types directly on the keyboard anywhere on the screen (not in any input field).\n- The typed characters appear floating in the air on screen.\n- If the typed sequence matches a cheat code, a coupon is activated.\n\nCUSTOMER LIST VALIDATION:\n- The system must prevent adding the same customer twice to the customer list.\n- Duplicate phone numbers should be rejected.\n\nLOGIN/REGISTRATION FLOW:\n- If a NEW customer enters their phone number, they should be prompted to choose a username.\n- If an EXISTING customer enters their phone number AND has a password set, they must enter the password before proceeding.",
+    "serverMode": "production",
+    "envs": {
+      "API_KEY": "sk-user--lY4HZj0JVUU0Zsm5ZBtBm0AOaj3kNjphfoUjMW4DgAna0LyI6d982tfwS5KMOzHikGuOzeQ_CqDx8HPcyMKGVw6OerOS_1uKj5Xi2WkbxPvz8qMMi6vmJcJVuY1JHbyLuE"
+    }
+  },
+  "serverPort": 62434
+}
