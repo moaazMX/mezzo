@@ -1,16 +1,28 @@
 import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
-import { X, CreditCard, Banknote, User, Phone, MapPin, Building, StickyNote, Navigation, AlertTriangle, ShoppingBag, Lock, Home, Briefcase, Plus, Pencil, ChevronRight } from 'lucide-react';
-import { supabase, DeviceCoupon, DeliveryService, DeliveryZoneLayer, Item, DeliveryZone, PolygonPoint } from '../lib/supabase';
+import { MapPin, Navigation, X, ChevronRight, ShoppingBag, CreditCard, Banknote, User, Phone, Building, StickyNote, AlertTriangle, Lock, Plus, Pencil, Home, Briefcase, Clock } from 'lucide-react';
+import MobileMapEditor from './MobileMapEditor';
+import { supabase, DeviceCoupon, DeliveryService, DeliveryZoneLayer, Item, DeliveryZone, PolygonPoint, CustomerData, AddressType, SavedAddressTab } from '../lib/supabase';
 import { generateEasyRecoveryCode, hashPhonePassword, hashRecoveryCode } from '../lib/phonePassword';
 import { getOrCreateDeviceFingerprint } from '../lib/deviceFingerprint';
+import { findCustomerIdByPhone, findCustomerAuthByPhone, ensureCustomerByPhone } from '../lib/customerPhone';
 import { useLanguage } from '../contexts/LanguageContext';
 import InteractiveMap from './InteractiveMap';
 import { getDeliveryMatch } from '../lib/deliveryMatch';
+import { useRealtimeRefetch } from '../hooks/useRealtimeSubscription';
+import AddressNamePopover from './AddressNamePopover';
+import TimePicker from './TimePicker';
 import { isTouchPhoneChrome } from '../lib/viewportUi';
+import ProgressiveImage from './ProgressiveImage';
+
+import { saveSharedAddress, getSharedAddress, subscribeToAddressSync, saveSharedAddressTabs, getSharedAddressTabs } from '../lib/addressSync';
 
 interface CheckoutCartItem extends Item {
   quantity: number;
+  /** True when the item was found unavailable during a cart sync pass */
+  cart_synced_unavailable?: boolean;
+  /** True when the item's data (price, name, etc.) changed during a cart sync pass */
+  cart_synced_data_changed?: boolean;
 }
 
 interface CheckoutProps {
@@ -28,40 +40,23 @@ interface CheckoutProps {
     orderNote?: string,
     appliedCouponId?: string,
     deliveryFee?: number,
-    serviceInfo?: { service: DeliveryService; layer: DeliveryZoneLayer | null } | null
+    serviceInfo?: { service: DeliveryService; layer: DeliveryZoneLayer | null } | null,
+    pickupMeta?: {
+      pickupDeadlineAt?: string;
+      pickupCommitmentKind?: 'now' | 'hour' | 'custom';
+      pickupCommitmentAck?: boolean;
+      pickupCommitmentLabel?: string;
+    }
   ) => void;
+  /** When true, final order submit is in progress (blocks duplicate taps). */
+  orderSubmitting?: boolean;
   onPhoneValidated?: (phone: string) => void | Promise<void>;
   onStartCartEdit?: () => void;
 }
 
-export interface CustomerData {
-  name: string;
-  phone: string;
-  address_type?: 'apartment' | 'house' | 'workplace' | 'custom';
-  address_label?: string;
-  street: string;
-  area: string;
-  city: string;
-  apartment?: string;
-  floor?: string;
-  building_number?: string;
-  house_name?: string;
-  company_name?: string;
-  landmark?: string;
-  latitude?: number;
-  longitude?: number;
-  deliveryMethod?: 'delivery' | 'pickup';
-  secondary_phone?: string;
-}
-
-type AddressType = 'apartment' | 'house' | 'workplace' | 'custom';
-type SavedAddressTab = {
-  id: string;
-  label: string;
-  data: Partial<CustomerData>;
-};
 
 const MAX_SAVED_CUSTOM_ADDRESSES = 4;
+const PICKUP_READY_STATUSES = ['preparing', 'arrived'];
 
 function normalizeSavedAddressLabelKey(label: string): string {
   return label.trim().toLowerCase();
@@ -104,6 +99,7 @@ export default function Checkout({
   availableCoupons,
   cartItems,
   onConfirm,
+  orderSubmitting = false,
   onPhoneValidated,
   onStartCartEdit
 }: CheckoutProps) {
@@ -112,7 +108,6 @@ export default function Checkout({
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'instant_transfer'>('cash');
   const [instantNumber, setInstantNumber] = useState('');
   const [orderNote, setOrderNote] = useState('');
-  const [gpsEnabled, setGpsEnabled] = useState(false);
   const [gpsLoading, setGpsLoading] = useState(false);
   const [gpsError, setGpsError] = useState<string | null>(null);
   const [isEditingLocation, setIsEditingLocation] = useState(false);
@@ -148,18 +143,16 @@ export default function Checkout({
     layer: DeliveryZoneLayer | null;
   } | null>(null);
   const [showSecondaryPhone, setShowSecondaryPhone] = useState(false);
-  const [phoneChrome, setPhoneChrome] = useState(() =>
-    typeof window !== 'undefined' ? isTouchPhoneChrome() : false
-  );
   const [mobileMapFullscreen, setMobileMapFullscreen] = useState(false);
   const [addressFieldErrors, setAddressFieldErrors] = useState<Record<string, boolean>>({});
   const locationBackupRef = useRef<CustomerData | null>(null);
   const requiredFieldRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const phoneInputRef = useRef<HTMLInputElement | null>(null);
+  const secondaryPhoneInputRef = useRef<HTMLInputElement | null>(null);
   const [phonePasswordInput, setPhonePasswordInput] = useState('');
   const [phonePasswordError, setPhonePasswordError] = useState<string | null>(null);
   /** إن كان الرقم مسجّلاً ومفعّلاً عليه كلمة مرور */
   const [phoneNeedsPassword, setPhoneNeedsPassword] = useState(false);
-  const [checkingPhoneAccount, setCheckingPhoneAccount] = useState(false);
   const [forgotMode, setForgotMode] = useState(false);
   const [recoveryCodeInput, setRecoveryCodeInput] = useState('');
   const [resetPwd1, setResetPwd1] = useState('');
@@ -167,11 +160,34 @@ export default function Checkout({
   const [resetErr, setResetErr] = useState<string | null>(null);
   const [resetBusy, setResetBusy] = useState(false);
   const [resetNewRecovery, setResetNewRecovery] = useState<string | null>(null);
+  const [phoneLengthError, setPhoneLengthError] = useState<string | null>(null);
+  const [secondaryPhoneLengthError, setSecondaryPhoneLengthError] = useState<string | null>(null);
+  const [pickupCommitmentAccepted, setPickupCommitmentAccepted] = useState(false);
+  const [pickupSlot, setPickupSlot] = useState<'now' | 'hour' | 'custom' | null>('hour');
+  const [pickupCustomPickerOpen, setPickupCustomPickerOpen] = useState(false);
+  const [pickupPreset, setPickupPreset] = useState<'now' | 'hour' | 'twohours' | 'custom'>('now');
+  const [pickupCustomHour, setPickupCustomHour] = useState(() => {
+    const dt = new Date(Date.now() + 60 * 60 * 1000);
+    let h = dt.getHours() % 12;
+    return h === 0 ? 12 : h;
+  });
+  const [pickupCustomMinute, setPickupCustomMinute] = useState(() => {
+    const dt = new Date(Date.now() + 60 * 60 * 1000);
+    return Math.round(dt.getMinutes() / 5) * 5 % 60;
+  });
+  const [pickupCustomAmPm, setPickupCustomAmPm] = useState<'AM' | 'PM'>(() => {
+    const dt = new Date(Date.now() + 60 * 60 * 1000);
+    return dt.getHours() >= 12 ? 'PM' : 'AM';
+  });
+  const [pickupCustomConfirmedLabel, setPickupCustomConfirmedLabel] = useState<string | null>(null);
+  const [pickupSheetDragY, setPickupSheetDragY] = useState(0);
   const [mobileSavedTabSheet, setMobileSavedTabSheet] = useState<SavedAddressTab | null>(null);
   const [renameSavedTarget, setRenameSavedTarget] = useState<SavedAddressTab | null>(null);
   const [renameSavedInput, setRenameSavedInput] = useState('');
   const savedTabLongPressTimer = useRef<number | null>(null);
   const savedTabLongPressConsumed = useRef(false);
+  const pickupSheetStartYRef = useRef(0);
+  const pickupSheetDraggingRef = useRef(false);
   const customerAccountCacheRef = useRef<{
     phone: string;
     row: {
@@ -181,6 +197,7 @@ export default function Checkout({
     } | null;
   } | null>(null);
   const customAddressAnchorRef = useRef<HTMLDivElement | null>(null);
+  const pickupInlineRef = useRef<HTMLDivElement | null>(null);
   const addressFormScrollRef = useRef<HTMLDivElement | null>(null);
   /** موضع نافذة اسم العنوان (ثابت بالنسبة للشاشة) لتفادي الحواف وقصّ overflow-y */
   const [addressNamePopoverPos, setAddressNamePopoverPos] = useState<{ top: number; left: number } | null>(null);
@@ -190,22 +207,56 @@ export default function Checkout({
     left: number;
     width: number;
   } | null>(null);
-
-  const syncPhoneChrome = useCallback(() => {
-    setPhoneChrome(isTouchPhoneChrome());
-  }, []);
+  const isMobileLayout = useSyncExternalStore(
+    (onStoreChange) => {
+      if (typeof window === 'undefined') return () => { };
+      const mq = window.matchMedia('(max-width: 767px)');
+      mq.addEventListener('change', onStoreChange);
+      return () => mq.removeEventListener('change', onStoreChange);
+    },
+    () => (typeof window !== 'undefined' ? window.matchMedia('(max-width: 767px)').matches : false),
+    () => false
+  );
+  const [pickupActivatedAt, setPickupActivatedAt] = useState<number | null>(null);
 
   useEffect(() => {
-    syncPhoneChrome();
-    window.addEventListener('resize', syncPhoneChrome);
-    const mq = window.matchMedia('(pointer: coarse)');
-    mq.addEventListener('change', syncPhoneChrome);
-    return () => {
-      window.removeEventListener('resize', syncPhoneChrome);
-      mq.removeEventListener('change', syncPhoneChrome);
-    };
-  }, [syncPhoneChrome]);
-  /** فأرة/لوحة مفاتيح حقيقية — ليست اعتماداً على عرض الشاشة */
+    if (deliveryMethod === 'pickup' && !pickupActivatedAt) {
+      setPickupActivatedAt(Date.now());
+    } else if (deliveryMethod === 'delivery') {
+      setPickupActivatedAt(null);
+    }
+  }, [deliveryMethod, pickupActivatedAt]);
+
+  useEffect(() => {
+    const savedDefault = localStorage.getItem('default_pickup_time');
+    if (savedDefault) {
+      setPickupSlot('custom');
+      setPickupCustomConfirmedLabel(savedDefault);
+    }
+  }, []);
+  useEffect(() => {
+    // Initial load
+    const sharedData = getSharedAddress();
+    if (Object.keys(sharedData).length > 0) {
+      setCustomerData(prev => ({ ...prev, ...sharedData }));
+    }
+
+    const sharedTabs = getSharedAddressTabs();
+    if (sharedTabs.length > 0) {
+      setSavedAddressTabs(sharedTabs);
+    }
+
+    // Subscribe to updates
+    return subscribeToAddressSync(
+      (data) => {
+        setCustomerData(prev => ({ ...prev, ...data }));
+      },
+      (tabs) => {
+        setSavedAddressTabs(tabs);
+      }
+    );
+  }, []);
+
   const isFinePointerDesktop = useSyncExternalStore(
     (onStoreChange) => {
       if (typeof window === 'undefined') return () => {};
@@ -221,13 +272,6 @@ export default function Checkout({
   );
   const SAVED_ADDRESS_TABS_KEY = 'checkout_saved_address_tabs';
   const SAVED_ADDRESS_TYPE_KEY = 'checkout_address_type';
-
-  const findCustomerIdByPhone = useCallback(async (phoneRaw: string): Promise<string | null> => {
-    const phone = filterDigits(phoneRaw || '');
-    if (!phone) return null;
-    const { data } = await supabase.from('customers').select('id').eq('phone', phone).maybeSingle();
-    return data?.id || null;
-  }, []);
 
   const loadServerAddressTabs = useCallback(async (customerId: string) => {
     const { data, error } = await supabase
@@ -257,7 +301,113 @@ export default function Checkout({
       }
     }));
     setSavedAddressTabs(mapped);
+    saveSharedAddressTabs(mapped);
   }, []);
+
+  const fetchLatestCustomerAddress = useCallback(async (phone: string) => {
+    const cleanPhone = filterDigits(phone || '');
+    if (cleanPhone.length < 10) return;
+
+    const { data: customerRow, error } = await supabase
+      .from('customers')
+      .select('*')
+      .eq('phone', cleanPhone)
+      .maybeSingle();
+
+    if (error) {
+      console.warn('fetchLatestCustomerAddress: failed', error);
+      return;
+    }
+
+    if (customerRow) {
+      const updated = {
+        name: customerRow.name || '',
+        phone: customerRow.phone || '',
+        secondary_phone: customerRow.secondary_phone || '',
+        building_number: customerRow.building_number || '',
+        street: customerRow.street || '',
+        area: customerRow.area || '',
+        city: customerRow.city || '',
+        floor: customerRow.floor || '',
+        apartment: customerRow.apartment || '',
+        house_name: customerRow.house_name || '',
+        company_name: customerRow.company_name || '',
+        landmark: customerRow.landmark || '',
+        latitude: typeof customerRow.latitude === 'number' ? customerRow.latitude : undefined,
+        longitude: typeof customerRow.longitude === 'number' ? customerRow.longitude : undefined,
+        address_type: customerRow.address_type || 'apartment',
+        address_label: customerRow.address_label || ''
+      } as CustomerData;
+
+      setCustomerData(prev => ({ ...prev, ...updated }));
+      saveSharedAddress(updated);
+
+      if (customerRow.id) {
+        void loadServerAddressTabs(customerRow.id);
+      }
+    }
+  }, [loadServerAddressTabs]);
+
+  const identifyByFingerprint = useCallback(async () => {
+    try {
+      const fp = getOrCreateDeviceFingerprint();
+      const { data: customerRow } = await supabase
+        .from('customers')
+        .select('*')
+        .eq('device_fingerprint', fp)
+        .maybeSingle();
+
+      if (customerRow) {
+        const updated = {
+          name: customerRow.name || '',
+          phone: customerRow.phone || '',
+          secondary_phone: customerRow.secondary_phone || '',
+          building_number: customerRow.building_number || '',
+          street: customerRow.street || '',
+          area: customerRow.area || '',
+          city: customerRow.city || '',
+          floor: customerRow.floor || '',
+          apartment: customerRow.apartment || '',
+          house_name: customerRow.house_name || '',
+          company_name: customerRow.company_name || '',
+          landmark: customerRow.landmark || '',
+          latitude: typeof customerRow.latitude === 'number' ? customerRow.latitude : undefined,
+          longitude: typeof customerRow.longitude === 'number' ? customerRow.longitude : undefined,
+          address_type: customerRow.address_type || 'apartment',
+          address_label: customerRow.address_label || ''
+        } as CustomerData;
+
+        setCustomerData(prev => ({ ...prev, ...updated }));
+        saveSharedAddress(updated);
+        
+        if (customerRow.id) {
+          void loadServerAddressTabs(customerRow.id);
+        }
+        
+        // Also sync back to App
+        if (customerRow.phone) {
+          // Defer to avoid setState during another component render
+          requestAnimationFrame(() => {
+            void Promise.resolve(onPhoneValidated?.(customerRow.phone)).catch(() => {});
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('identifyByFingerprint failed:', e);
+    }
+  }, [loadServerAddressTabs, onPhoneValidated]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    
+    const p = customerData.phone ? filterDigits(customerData.phone) : '';
+    if (p.length >= 10) {
+      void fetchLatestCustomerAddress(p);
+    } else {
+      // If no phone yet, try identifying by device fingerprint
+      void identifyByFingerprint();
+    }
+  }, [isOpen]);
 
   const validateAddressForSubmit = (): { message: string | null; fields: string[] } => {
     const c = customerData;
@@ -313,9 +463,17 @@ export default function Checkout({
         landmark: customerData.landmark
       }
     };
-    setSavedAddressTabs((prev) => [newTab, ...prev]);
+    setSavedAddressTabs((prev) => {
+      const updated = [newTab, ...prev];
+      saveSharedAddressTabs(updated);
+      return updated;
+    });
     setActiveAddressType(type);
-    setCustomerData((prev) => ({ ...prev, address_type: type, address_label: label }));
+    setCustomerData((prev) => {
+      const updated = { ...prev, address_type: type, address_label: label };
+      saveSharedAddress(updated);
+      return updated;
+    });
     setIsCreatingCustomAddress(false);
     setPendingAddressType(null);
     setNewAddressName('');
@@ -343,10 +501,18 @@ export default function Checkout({
   const removeSavedAddressTab = async (tab: SavedAddressTab) => {
     setMobileSavedTabSheet(null);
     setMobileSavedTabMenuPos(null);
-    setSavedAddressTabs((prev) => prev.filter((t) => t.id !== tab.id));
+    setSavedAddressTabs((prev) => {
+      const updated = prev.filter((t) => t.id !== tab.id);
+      saveSharedAddressTabs(updated);
+      return updated;
+    });
     if (customerData.address_label === tab.label) {
       setActiveAddressType('apartment');
-      setCustomerData((prev) => ({ ...prev, address_type: 'apartment', address_label: '' }));
+      setCustomerData((prev) => {
+        const updated = { ...prev, address_type: 'apartment', address_label: '' } as CustomerData;
+        saveSharedAddress(updated);
+        return updated;
+      });
     }
     const cid = await findCustomerIdByPhone(customerData.phone || '');
     if (cid && tab.id.includes('-')) {
@@ -364,13 +530,19 @@ export default function Checkout({
       setRenameSavedInput('');
       return;
     }
-    setSavedAddressTabs((prev) =>
-      prev.map((t) =>
+    setSavedAddressTabs((prev) => {
+      const updated = prev.map((t) =>
         t.id === tab.id ? { ...t, label: newLabel, data: { ...t.data, address_label: newLabel } } : t
-      )
-    );
+      );
+      saveSharedAddressTabs(updated);
+      return updated;
+    });
     if (customerData.address_label === tab.label) {
-      setCustomerData((prev) => ({ ...prev, address_label: newLabel }));
+      setCustomerData((prev) => {
+        const updated = { ...prev, address_label: newLabel };
+        saveSharedAddress(updated);
+        return updated;
+      });
     }
     const cid = await findCustomerIdByPhone(customerData.phone || '');
     if (cid && tab.id.includes('-')) {
@@ -425,12 +597,16 @@ export default function Checkout({
     setMobileSavedTabMenuPos(null);
     const savedType = ((tab.data.address_type as AddressType) || 'custom');
     setActiveAddressType(savedType);
-    setCustomerData((prev) => ({
-      ...prev,
-      ...tab.data,
-      address_type: savedType,
-      address_label: tab.label
-    }));
+    setCustomerData((prev) => {
+      const updated = {
+        ...prev,
+        ...tab.data,
+        address_type: savedType,
+        address_label: tab.label
+      };
+      saveSharedAddress(updated);
+      return updated;
+    });
   };
 
   const filterDigits = (val: string) => val.replace(/\D/g, '');
@@ -459,6 +635,14 @@ export default function Checkout({
     return () => window.clearTimeout(t);
   }, [customerData.phone]);
 
+  useEffect(() => {
+    const sec = filterDigits(customerData.secondary_phone || '');
+    // If a secondary phone exists, keep the field visible across checkout reopen.
+    if (sec.length > 0) {
+      setShowSecondaryPhone(true);
+    }
+  }, [customerData.secondary_phone]);
+
   // Lock page scroll only for fullscreen modal checkout (not embedded inside cart)
   useEffect(() => {
     if (!isOpen || embedded) return;
@@ -485,6 +669,17 @@ export default function Checkout({
   const finalTotal = Math.max(0, total - discountAmount);
   const grandTotal = finalTotal + (deliveryFee || 0);
 
+  const checkoutLiveRefetchRef = useRef<() => void>(() => {});
+
+  useRealtimeRefetch(
+    'checkout-live',
+    ['settings', 'delivery_zones', 'delivery_services', 'delivery_zone_layers'],
+    () => {
+      checkoutLiveRefetchRef.current();
+    },
+    { enabled: isOpen }
+  );
+
   useEffect(() => {
     const savedData = localStorage.getItem('customer_data');
     let resolvedAddressType: AddressType = 'apartment';
@@ -494,8 +689,7 @@ export default function Checkout({
       resolvedAddressType = (parsed.address_type || 'apartment') as AddressType;
       // Check if GPS was previously enabled
       if (parsed.latitude && parsed.longitude) {
-        setGpsEnabled(true);
-      }
+          }
     }
     const savedTabsRaw = localStorage.getItem(SAVED_ADDRESS_TABS_KEY);
     if (savedTabsRaw) {
@@ -541,8 +735,7 @@ export default function Checkout({
     const fetchZones = async () => {
       const { data, error } = await supabase
         .from('delivery_zones')
-        .select('*')
-        .eq('is_active', true);
+        .select('*');
 
       if (error) {
         console.error('Error fetching delivery zones:', error);
@@ -645,6 +838,12 @@ export default function Checkout({
     fetchInstantNumber();
     fetchServices();
     fetchZones();
+
+    checkoutLiveRefetchRef.current = () => {
+      void fetchInstantNumber();
+      void fetchServices();
+      void fetchZones();
+    };
   }, []);
 
   useEffect(() => {
@@ -813,8 +1012,7 @@ export default function Checkout({
           latitude,
           longitude
         }));
-        setGpsEnabled(true);
-        setGpsLoading(false);
+            setGpsLoading(false);
         // لا نفتح الخريطة تلقائياً، فقط نملأ العنوان من أقرب شارع/منطقة/مدينة
         await reverseGeocodeAndSetAddress(latitude, longitude);
       },
@@ -843,15 +1041,6 @@ export default function Checkout({
         maximumAge: 0
       }
     );
-  };
-
-  const handleLocationChange = (lat: number, lng: number) => {
-    setCustomerData(prev => ({
-      ...prev,
-      latitude: lat,
-      longitude: lng
-    }));
-    setGpsEnabled(true);
   };
 
   const handleAddressChange = (address: { street: string; area: string; city: string; buildingNumber: string }) => {
@@ -972,6 +1161,66 @@ export default function Checkout({
       return;
     }
     const phone = filterDigits(customerData.phone.trim());
+    if (phone.length > 15) {
+      setPhoneLengthError('Phone number must not exceed 15 digits');
+      setSecondaryPhoneLengthError(null);
+      const input = phoneInputRef.current;
+      if (input) {
+        const rect = input.getBoundingClientRect();
+        const notVisible = rect.top < 0 || rect.bottom > window.innerHeight;
+        if (notVisible) {
+          input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        window.setTimeout(() => input.focus(), 220);
+      }
+      return;
+    }
+    if (phone.length < 10) {
+      setPhoneLengthError('يجب أن يكون الرقم 10 أرقام على الأقل');
+      setSecondaryPhoneLengthError(null);
+      const input = phoneInputRef.current;
+      if (input) {
+        const rect = input.getBoundingClientRect();
+        const notVisible = rect.top < 0 || rect.bottom > window.innerHeight;
+        if (notVisible) {
+          input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        window.setTimeout(() => input.focus(), 220);
+      }
+      return;
+    }
+
+    const secondary = filterDigits(customerData.secondary_phone || '');
+    if (secondary.length > 15) {
+      setSecondaryPhoneLengthError('Phone number must not exceed 15 digits');
+      setPhoneLengthError(null);
+      const input = secondaryPhoneInputRef.current;
+      if (input) {
+        const rect = input.getBoundingClientRect();
+        const notVisible = rect.top < 0 || rect.bottom > window.innerHeight;
+        if (notVisible) {
+          input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        window.setTimeout(() => input.focus(), 220);
+      }
+      return;
+    }
+    if (secondary.length > 0 && secondary.length < 10) {
+      setSecondaryPhoneLengthError('يجب أن يكون الرقم 10 أرقام على الأقل');
+      setPhoneLengthError(null);
+      const input = secondaryPhoneInputRef.current;
+      if (input) {
+        const rect = input.getBoundingClientRect();
+        const notVisible = rect.top < 0 || rect.bottom > window.innerHeight;
+        if (notVisible) {
+          input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        window.setTimeout(() => input.focus(), 220);
+      }
+      return;
+    }
+    setPhoneLengthError(null);
+    setSecondaryPhoneLengthError(null);
     setPhonePasswordError(null);
 
     const cached = customerAccountCacheRef.current;
@@ -980,12 +1229,7 @@ export default function Checkout({
         ? cached.row
         : undefined;
     if (existing === undefined) {
-      const { data } = await supabase
-        .from('customers')
-        .select('id, phone_password_hash, phone_password_owner_fingerprint')
-        .eq('phone', phone)
-        .maybeSingle();
-      existing = data ?? null;
+      existing = await findCustomerAuthByPhone(phone);
       customerAccountCacheRef.current = { phone, row: existing };
     }
 
@@ -1026,28 +1270,36 @@ export default function Checkout({
 
     setActiveStep('address');
     localStorage.setItem('customer_phone', phone);
-    localStorage.setItem(
-      'customer_data',
-      JSON.stringify({
-        ...customerData,
-        phone,
-        deliveryMethod
-      })
-    );
+    
+    const customerUpdatePayload = {
+      name: customerData.name,
+      phone: phone,
+      secondary_phone: customerData.secondary_phone || null,
+      device_fingerprint: fp,
+      updated_at: new Date().toISOString()
+    };
+
+    const savedCustomerId = await ensureCustomerByPhone(phone, customerUpdatePayload);
+    if (savedCustomerId) {
+      void loadServerAddressTabs(savedCustomerId);
+    }
+
+    const updatedLocalStorage = {
+      ...customerData,
+      phone,
+      deliveryMethod
+    };
+    localStorage.setItem('customer_data', JSON.stringify(updatedLocalStorage));
+    saveSharedAddress(updatedLocalStorage);
+
     requestAnimationFrame(() => {
       void Promise.resolve(onPhoneValidated?.(phone)).catch(() => {});
     });
-    if (existing?.id) {
-      void loadServerAddressTabs(existing.id);
-    } else {
-      void findCustomerIdByPhone(phone).then((id) => {
-        if (id) void loadServerAddressTabs(id);
-      });
-    }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (orderSubmitting) return;
     // Require GPS location (lat & lng) before sending the order
     if (!customerData.latitude || !customerData.longitude) {
       setGpsError(
@@ -1084,15 +1336,74 @@ export default function Checkout({
       }
       return;
     }
+    if (deliveryMethod === 'pickup') {
+      if (!pickupSlot) {
+        setGpsError(language === 'ar' ? 'اختر موعد الاستلام أولاً.' : 'Please choose a pickup slot first.');
+        return;
+      }
+      if (pickupSlot === 'custom' && !pickupCustomConfirmedLabel) {
+        setGpsError(language === 'ar' ? 'يرجى تأكيد الموعد المخصص أولاً.' : 'Please confirm your custom pickup time first.');
+        return;
+      }
+      if (!pickupCommitmentAccepted) {
+        setGpsError(
+          language === 'ar'
+            ? 'يجب الموافقة على تعهد الحضور قبل إتمام طلب الاستلام.'
+            : 'You must accept the pickup commitment before confirming the order.'
+        );
+        return;
+      }
+    }
     localStorage.setItem('customer_data', JSON.stringify({ ...customerData, deliveryMethod }));
     localStorage.setItem('customer_phone', customerData.phone);
+    const now = new Date();
+    let pickupDeadlineAt: string | undefined;
+    let pickupCommitmentLabel: string | undefined;
+    if (deliveryMethod === 'pickup') {
+      if (pickupSlot === 'now') {
+        pickupDeadlineAt = new Date(now.getTime() + 2 * 60 * 60 * 1000).toISOString();
+        pickupCommitmentLabel = language === 'ar' ? 'استلام الآن (خلال ساعتين)' : 'Pickup now (2 hours)';
+      } else if (pickupSlot === 'hour') {
+        const baseTs = pickupActivatedAt || now.getTime();
+        pickupDeadlineAt = new Date(baseTs + 60 * 60 * 1000).toISOString();
+        pickupCommitmentLabel = language === 'ar' ? 'خلال ساعة' : 'Within one hour';
+      } else if (pickupSlot === 'custom') {
+        const hour24 = (() => {
+          const h = pickupCustomHour % 12;
+          return pickupCustomAmPm === 'PM' ? h + 12 : h;
+        })();
+        const target = new Date();
+        target.setHours(hour24, pickupCustomMinute, 0, 0);
+        if (target.getTime() <= now.getTime()) {
+          target.setDate(target.getDate() + 1);
+        }
+        pickupDeadlineAt = target.toISOString();
+        const dayLabel = language === 'ar' 
+          ? (target.getDate() !== now.getDate() ? 'غداً' : 'اليوم') 
+          : (target.getDate() !== now.getDate() ? 'Tomorrow' : 'Today');
+
+        pickupCommitmentLabel =
+          language === 'ar'
+            ? `موعد الاستلام: ${dayLabel} - ${pickupCustomHour}:${pickupCustomMinute.toString().padStart(2, '0')} ${pickupCustomAmPm === 'PM' ? 'م' : 'ص'}`
+            : `Pickup at ${dayLabel} - ${pickupCustomHour}:${pickupCustomMinute.toString().padStart(2, '0')} ${pickupCustomAmPm}`;
+      }
+    }
+
     onConfirm(
       { ...customerData, deliveryMethod },
       paymentMethod,
       orderNote.trim() || undefined,
       selectedCouponId || undefined,
       deliveryFee || 0,
-      selectedServiceInfo
+      selectedServiceInfo,
+      deliveryMethod === 'pickup'
+        ? {
+            pickupDeadlineAt,
+            pickupCommitmentKind: pickupSlot || undefined,
+            pickupCommitmentAck: pickupCommitmentAccepted,
+            pickupCommitmentLabel
+          }
+        : undefined
     );
   };
 
@@ -1110,6 +1421,52 @@ export default function Checkout({
       setResetNewRecovery(null);
     }
   }, [isOpen, embedded]);
+
+  useEffect(() => {
+    if (deliveryMethod === 'delivery') {
+      setPickupCommitmentAccepted(false);
+      setPickupCustomPickerOpen(false);
+    } else if (!pickupSlot) {
+      setPickupSlot('hour');
+      // Ensure custom picker states are also synced to "hour from now" when entering pickup mode
+      const nowTs = Date.now();
+      const dt = new Date(nowTs + 60 * 60 * 1000);
+      let h = dt.getHours() % 12;
+      if (h === 0) h = 12;
+      setPickupCustomHour(h);
+      setPickupCustomMinute(Math.round(dt.getMinutes() / 5) * 5 % 60);
+      setPickupCustomAmPm(dt.getHours() >= 12 ? 'PM' : 'AM');
+      if (!pickupActivatedAt) setPickupActivatedAt(nowTs);
+    }
+  }, [deliveryMethod, pickupSlot]);
+
+  const applyPreset = useCallback(
+    (preset: 'now' | 'hour' | 'twohours' | 'custom') => {
+      setPickupPreset(preset);
+      if (preset !== 'custom') {
+        const dt = new Date(Date.now() + (preset === 'hour' ? 60 : 120) * 60 * 1000);
+        let hour = dt.getHours();
+        const ampm: 'AM' | 'PM' = hour >= 12 ? 'PM' : 'AM';
+        hour = hour % 12;
+        if (hour === 0) hour = 12;
+        const minute = Math.round(dt.getMinutes() / 5) * 5 % 60;
+        setPickupCustomHour(hour);
+        setPickupCustomMinute(minute);
+        setPickupCustomAmPm(ampm);
+      }
+    },
+    []
+  );
+
+  const handleOpenCustomPicker = useCallback(() => {
+    // Don't set pickupSlot to 'custom' yet; wait for onConfirm
+    // This keeps the current (e.g. 'hour') badge visible while the picker is open.
+    setPickupPreset('custom');
+    setPickupCustomPickerOpen(true);
+    setGpsError(null);
+    window.setTimeout(() => pickupInlineRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
+  }, []);
+
 
   if (!isOpen) return null;
 
@@ -1198,11 +1555,20 @@ export default function Checkout({
                     type="tel"
                     required
                     value={customerData.phone}
-                    onChange={(e) => setCustomerData({ ...customerData, phone: filterDigits(e.target.value) })}
-                    className="w-full bg-dark border border-primary/40 rounded-lg px-3 py-2.5 text-white text-right focus:outline-none focus:border-primary text-sm font-bold"
+                    maxLength={15}
+                    onChange={(e) => {
+                      const next = filterDigits(e.target.value).slice(0, 15);
+                      setCustomerData({ ...customerData, phone: next });
+                      if (phoneLengthError) setPhoneLengthError(null);
+                    }}
+                    ref={phoneInputRef}
+                    className={`w-full bg-dark border rounded-lg px-3 py-2.5 text-white text-right focus:outline-none text-sm font-bold ${phoneLengthError ? 'border-red-500 focus:border-red-500' : 'border-primary/40 focus:border-primary'}`}
                     placeholder={language === 'ar' ? 'رقم الهاتف الأساسي' : 'Primary phone number'}
                     dir="ltr"
                   />
+                  {phoneLengthError && (
+                    <p className="mt-2 text-right text-sm font-bold text-red-400">{phoneLengthError}</p>
+                  )}
                 </div>
 
                 {showSecondaryPhone ? (
@@ -1211,12 +1577,21 @@ export default function Checkout({
                       <span>{language === 'ar' ? 'رقم الهاتف الاحتياطي' : 'Secondary Phone'}</span>
                       <Phone className="w-4 h-4 text-primary" />
                     </label>
-                    <div className="relative">
+                    <div>
+                      <div className="relative">
                       <input
                         type="tel"
                         value={customerData.secondary_phone || ''}
-                        onChange={(e) => setCustomerData({ ...customerData, secondary_phone: filterDigits(e.target.value) })}
-                        className="w-full bg-dark border border-primary/40 rounded-lg px-3 py-2.5 text-white text-right focus:outline-none focus:border-primary text-sm font-bold pl-10"
+                        maxLength={15}
+                        ref={secondaryPhoneInputRef}
+                        onChange={(e) => {
+                          const next = filterDigits(e.target.value).slice(0, 15);
+                          setCustomerData({ ...customerData, secondary_phone: next });
+                          if (secondaryPhoneLengthError) setSecondaryPhoneLengthError(null);
+                        }}
+                        className={`w-full bg-dark border rounded-lg px-3 py-2.5 text-white text-right focus:outline-none text-sm font-bold pl-10 ${
+                          secondaryPhoneLengthError ? 'border-red-500 focus:border-red-500' : 'border-primary/40 focus:border-primary'
+                        }`}
                         placeholder={language === 'ar' ? 'رقم الهاتف الاحتياطي (اختياري)' : 'Secondary phone (optional)'}
                         dir="ltr"
                       />
@@ -1225,12 +1600,18 @@ export default function Checkout({
                         onClick={() => {
                           setCustomerData({ ...customerData, secondary_phone: '' });
                           setShowSecondaryPhone(false);
+                          setSecondaryPhoneLengthError(null);
                         }}
                         className="absolute left-2 top-1/2 -translate-y-1/2 text-red-400 hover:text-red-300 p-1.5 transition-colors"
                         title={language === 'ar' ? 'حذف الرقم' : 'Delete number'}
                       >
                         <X className="w-4 h-4" />
                       </button>
+                      </div>
+
+                      {secondaryPhoneLengthError && (
+                        <p className="mt-2 text-right text-sm font-bold text-red-400">{secondaryPhoneLengthError}</p>
+                      )}
                     </div>
                   </div>
                 ) : (
@@ -1415,9 +1796,6 @@ export default function Checkout({
                       </div>
                     )}
 
-                    {checkingPhoneAccount && (
-                      <p className="text-[10px] text-muted text-right">{language === 'ar' ? 'جاري التحقق…' : 'Checking…'}</p>
-                    )}
                   </div>
                 )}
 
@@ -1469,73 +1847,18 @@ export default function Checkout({
                   </button>
                 </div>
 
+                <div ref={pickupInlineRef} />
+
                 {/* 1. Map */}
                 <div className="space-y-3">
                   <h3 className="text-base font-bold text-white text-right flex items-center gap-2">
                     <MapPin className="w-4 h-4" />
                     <span>{language === 'ar' ? 'اختر موقعك على الخريطة' : 'Select your location on the map'}</span>
                   </h3>
-                  {customerData.latitude && customerData.longitude && !isEditingLocation && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        locationBackupRef.current = { ...customerData };
-                        setIsEditingLocation(true);
-                        if (phoneChrome) setMobileMapFullscreen(true);
-                      }}
-                      className="text-purple-400 hover:text-muted text-xs font-bold"
-                    >
-                      {language === 'ar' ? 'تعديل الموقع' : 'Edit Location'}
-                    </button>
-                  )}
                   <div>
                     {customerData.latitude && customerData.longitude ? (
                       <div className="mb-4">
-                        {isEditingLocation && (
-                          <div className="flex gap-2 justify-end mb-3">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                if (locationBackupRef.current) {
-                                  setCustomerData(locationBackupRef.current);
-                                }
-                                setIsEditingLocation(false);
-                                setMobileMapFullscreen(false);
-                              }}
-                              className="px-4 py-2 bg-red-700/60 hover:bg-red-600 text-white rounded-lg text-sm transition-colors"
-                            >
-                              {language === 'ar' ? 'إغلاق' : 'Close'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={async () => {
-                                if (customerData.latitude && customerData.longitude) {
-                                  await reverseGeocodeAndSetAddress(customerData.latitude, customerData.longitude);
-                                }
-                                setIsEditingLocation(false);
-                                setMobileMapFullscreen(false);
-                              }}
-                              className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm transition-colors"
-                            >
-                              {language === 'ar' ? 'حفظ' : 'Save'}
-                            </button>
-                          </div>
-                        )}
-
-                        {isEditingLocation && !phoneChrome ? (
-                          <>
-                            <InteractiveMap
-                              latitude={customerData.latitude}
-                              longitude={customerData.longitude}
-                              onLocationChange={handleLocationChange}
-                              onAddressChange={handleAddressChange}
-                              isEditing={true}
-                              zones={showDebugMap ? allZones : []}
-                              services={showDebugMap ? deliveryServices : []}
-                              className="mb-2"
-                            />
-                          </>
-                        ) : (
+                        {!isEditingLocation && (
                           <div className="bg-dark border border-primary/40 rounded-lg p-3 text-right space-y-2">
                             <div className="w-full overflow-hidden rounded-lg border border-primary/30">
                               <InteractiveMap
@@ -1547,11 +1870,25 @@ export default function Checkout({
                                 className="!h-44 sm:!h-52"
                               />
                             </div>
-                            <p className="text-muted text-sm">
-                              {language === 'ar'
-                                ? 'تم تحديد موقعك. يمكنك تعديل الموقع من الخريطة إذا رغبت.'
-                                : 'Your location is set. You can edit it on the map if you like.'}
-                            </p>
+                            <div className="flex items-center justify-between">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    locationBackupRef.current = { ...customerData };
+                                    setIsEditingLocation(true);
+                                    setMobileMapFullscreen(true);
+                                  }}
+                                  className="w-8 h-8 flex items-center justify-center rounded-lg border border-primary/35 bg-primary/10 text-primary transition-all active:scale-[0.95]"
+                                  title={language === 'ar' ? 'تعديل الموقع' : 'Edit Location'}
+                                >
+                                  <Pencil className="w-4 h-4" />
+                                </button>
+                              <p className="text-muted text-sm">
+                                {language === 'ar'
+                                  ? 'تم تحديد موقعك. يمكنك تعديل الموقع من الخريطة إذا رغبت.'
+                                  : 'Your location is set. You can edit it on the map if you like.'}
+                              </p>
+                            </div>
                             {customerData.latitude && customerData.longitude && (
                               <p className="text-xs text-purple-400 font-mono">
                                 {customerData.latitude.toFixed(6)}, {customerData.longitude.toFixed(6)}
@@ -1564,7 +1901,6 @@ export default function Checkout({
                             </p>
                           </div>
                         )}
-
                       </div>
                     ) : (
                       <div className="bg-dark border border-primary/40 rounded-lg p-6 text-center mb-4">
@@ -1626,6 +1962,74 @@ export default function Checkout({
                       <Navigation className="w-4 h-4" />
                       {language === 'ar' ? 'فتح في خرائط جوجل' : 'Open in Google Maps'}
                     </button>
+                  </div>
+                )}
+
+                {deliveryMethod === 'pickup' && (
+                  <div className="mt-3 p-4 bg-dark/60 border border-primary/35 rounded-2xl space-y-3">
+                    <h4 className="text-white font-black text-sm text-right">
+                      {language === 'ar' ? 'موعد الاستلام' : 'Pickup commitment time'}
+                    </h4>
+                    <div className="space-y-3">
+                      {pickupSlot === 'hour' && (
+                        <p className="text-[10px] text-primary/80 text-right leading-relaxed px-1">
+                          {language === 'ar' 
+                            ? 'تم تحديد موعد الاستلام تلقائياً "خلال ساعة" من الآن. اضغط على الموعد لتغييره.'
+                            : 'Pickup time is automatically set to "within one hour". Click on the time to change it.'}
+                        </p>
+                      )}
+
+                      {(pickupSlot === 'hour' || (pickupSlot === 'custom' && pickupCustomConfirmedLabel)) && (
+                        <button
+                          type="button"
+                          onClick={handleOpenCustomPicker}
+                          className="w-full p-3 bg-primary/10 border-2 border-primary/30 rounded-xl animate-in fade-in zoom-in duration-300 flex items-center justify-between gap-3 text-right transition-all hover:bg-primary/20 active:scale-[0.98] group"
+                        >
+                          <div className="flex-1">
+                            <div className="flex items-center justify-end gap-1.5 mb-0.5">
+                              <span className="text-[10px] text-primary/60 font-black group-hover:text-primary transition-colors">
+                                {language === 'ar' ? '(اضغط للتعديل)' : '(Click to edit)'}
+                              </span>
+                              <p className="text-[10px] text-primary/70 font-black">
+                                {language === 'ar' ? 'وقت الاستلام المتوقع:' : 'Expected Pickup Time:'}
+                              </p>
+                            </div>
+                            <p className="text-sm text-white font-black">
+                              {pickupSlot === 'hour' ? (() => {
+                                const baseTime = pickupActivatedAt || Date.now();
+                                const target = new Date(baseTime + 60 * 60 * 1000);
+                                const hh = target.getHours();
+                                const mm = target.getMinutes().toString().padStart(2, '0');
+                                const ampmLabel = hh >= 12 ? (language === 'ar' ? 'م' : 'PM') : (language === 'ar' ? 'ص' : 'AM');
+                                const h12 = hh % 12 || 12;
+                                const isTomorrow = target.getDate() !== new Date(baseTime).getDate();
+                                const dayLabel = language === 'ar' ? (isTomorrow ? 'غداً' : 'اليوم') : (isTomorrow ? 'Tomorrow' : 'Today');
+                                return `${dayLabel} - ${h12}:${mm} ${ampmLabel}`;
+                              })() : pickupCustomConfirmedLabel?.split(': ').slice(1).join(': ')}
+                            </p>
+                          </div>
+                          <div className="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center flex-shrink-0 group-hover:bg-primary/30 transition-colors">
+                            <Clock className="w-5 h-5 text-primary" />
+                          </div>
+                        </button>
+                      )}
+                    </div>
+                    <label className="flex items-start gap-2 text-right text-xs text-gray-200 leading-relaxed">
+                      <input
+                        type="checkbox"
+                        checked={pickupCommitmentAccepted}
+                        onChange={(e) => {
+                          setPickupCommitmentAccepted(e.target.checked);
+                          if (e.target.checked) setGpsError(null);
+                        }}
+                        className="mt-0.5 accent-primary"
+                      />
+                      <span>
+                        {language === 'ar'
+                          ? 'أتعهد بالحضور لاستلام طلبي في الوقت المحدد، وأفهم أن الطلب قد يُلغى تلقائياً إذا لم أحضر'
+                          : 'I commit to pick up my order on time and understand it may be auto-cancelled if I do not show up.'}
+                      </span>
+                    </label>
                   </div>
                 )}
 
@@ -2085,35 +2489,57 @@ export default function Checkout({
                   {Array.isArray(cartItems) && cartItems.length > 0 && (
                     <div className="max-h-32 overflow-y-auto custom-scrollbar space-y-1 text-right mb-2">
                       {cartItems.map(item => {
-                        const basePrice = item.has_offer && item.offer_price ? item.offer_price : item.price;
-                        const subtotal = basePrice * item.quantity;
+                        const hasOffer = !!(item.has_offer && item.offer_price);
+                        const unitPrice = hasOffer ? (item.offer_price as number) : item.price;
+                        const subtotal = unitPrice * item.quantity;
                         return (
                           <div
                             key={item.id}
-                            className="flex items-center justify-between gap-2 bg-dark/60 rounded-lg px-2 py-1"
+                            className={`flex items-center justify-between gap-2 rounded-lg px-2 py-1 ${item.cart_synced_unavailable ? 'bg-red-900/40 border border-red-500/50' : 'bg-dark/60'}`}
                           >
                             <div className="flex items-center gap-2">
                               {item.image_url ? (
-                                <img
+                                <ProgressiveImage
                                   src={item.image_url}
                                   alt={language === 'ar' ? item.name : item.name_en}
-                                  loading="lazy"
-                                  decoding="async"
-                                  onLoad={(e) => e.currentTarget.classList.add('is-loaded')}
-                                  className="w-8 h-8 rounded-md object-cover img-fade"
+                                  preset="thumb"
+                                  wrapperClassName="w-8 h-8 shrink-0"
+                                  className={`w-full h-full rounded-md object-cover ${item.cart_synced_unavailable ? 'opacity-50 grayscale' : ''}`}
                                 />
                               ) : (
                                 <div className="w-8 h-8 rounded-md bg-surface flex items-center justify-center text-xs text-muted">
                                   MX
                                 </div>
                               )}
-                              <div className="flex flex-col items-end">
-                                <span className="text-xs text-white font-bold line-clamp-1">
-                                  {language === 'ar' ? item.name : item.name_en}
-                                </span>
-                                <span className="text-[11px] text-muted">
-                                  × {item.quantity}
-                                </span>
+                              <div className="flex flex-col items-start">
+                                <div className="flex items-center gap-1">
+                                  {item.cart_synced_unavailable && (
+                                    <span className="text-[10px] text-red-400 font-bold bg-red-950/50 px-1.5 py-0.5 rounded">
+                                      {language === 'ar' ? 'غير متوفر' : 'Unavailable'}
+                                    </span>
+                                  )}
+                                  {item.cart_synced_data_changed && !item.cart_synced_unavailable && (
+                                    <span className="text-[10px] text-yellow-500 font-bold bg-yellow-950/50 px-1.5 py-0.5 rounded">
+                                      {language === 'ar' ? 'تم تحديث البيانات' : 'Updated'}
+                                    </span>
+                                  )}
+                                  <span className="text-xs text-white font-bold line-clamp-1">
+                                    {language === 'ar' ? item.name : item.name_en}
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-2 text-[11px]">
+                                  <span className="text-muted">× {item.quantity}</span>
+                                  <span className={`inline-flex items-center gap-1 ${language === 'ar' ? 'flex-row-reverse' : 'flex-row'}`}>
+                                    {hasOffer && (
+                                      <span className="text-muted/60 line-through text-[10px] whitespace-nowrap">
+                                        {item.price} <span className="text-[10px]">{currencySymbol}</span>
+                                      </span>
+                                    )}
+                                    <span className="text-primary font-black whitespace-nowrap">
+                                      {unitPrice} <span className="text-[10px]">{currencySymbol}</span>
+                                    </span>
+                                  </span>
+                                </div>
                               </div>
                             </div>
                             <div className="text-[11px] text-white font-bold">
@@ -2168,8 +2594,12 @@ export default function Checkout({
                   {selectedServiceInfo && (
                     <div className="text-xs text-right mt-1 text-purple-300">
                       {language === 'ar'
-                        ? `سوف يتم التوصيل من فرع: ${selectedServiceInfo.service.name}`
-                        : `Delivery from branch: ${selectedServiceInfo.service.name}`}
+                        ? (deliveryMethod === 'pickup' 
+                            ? `سوف يتم الاستلام من فرع: ${selectedServiceInfo.service.name}`
+                            : `سوف يتم التوصيل من فرع: ${selectedServiceInfo.service.name}`)
+                        : (deliveryMethod === 'pickup'
+                            ? `Pickup from branch: ${selectedServiceInfo.service.name}`
+                            : `Delivery from branch: ${selectedServiceInfo.service.name}`)}
                     </div>
                   )}
 
@@ -2187,16 +2617,29 @@ export default function Checkout({
               <div className="pt-2 pb-4">
                 <button
                   type="submit"
-                  disabled={deliveryMethod === 'delivery' && isInDeliveryZone !== true}
-                  className={`w-full rounded-2xl py-3 text-lg font-black shadow-lg ${deliveryMethod === 'delivery' && isInDeliveryZone !== true
+                  disabled={
+                    orderSubmitting ||
+                    (deliveryMethod === 'delivery' && isInDeliveryZone !== true) ||
+                    (deliveryMethod === 'pickup' && (!pickupCommitmentAccepted || !pickupSlot || (pickupSlot === 'custom' && !pickupCustomConfirmedLabel)))
+                  }
+                  className={`w-full rounded-2xl py-3 text-lg font-black shadow-lg ${
+                    orderSubmitting ||
+                    (deliveryMethod === 'delivery' && isInDeliveryZone !== true) ||
+                    (deliveryMethod === 'pickup' && (!pickupCommitmentAccepted || !pickupSlot || (pickupSlot === 'custom' && !pickupCustomConfirmedLabel)))
                     ? 'cursor-not-allowed bg-gray-700 text-gray-300'
                     : 'bg-primary text-white'
                     }`}
                 >
-                  {deliveryMethod === 'delivery' && isInDeliveryZone !== true
+                  {orderSubmitting
+                    ? language === 'ar'
+                      ? 'جاري إرسال الطلب…'
+                      : 'Sending order…'
+                    : deliveryMethod === 'delivery' && isInDeliveryZone !== true
                     ? language === 'ar'
                       ? 'خارج زون التوصيل'
                       : 'Outside delivery zone'
+                    : deliveryMethod === 'pickup' && !pickupCommitmentAccepted
+                      ? (language === 'ar' ? 'وافق على التعهد أولاً' : 'Accept commitment first')
                     : t('checkout.confirm')}
                 </button>
               </div>
@@ -2219,53 +2662,130 @@ export default function Checkout({
           {sheet}
         </div>
       )}
-      {phoneChrome && mobileMapFullscreen && customerData.latitude && customerData.longitude && (
-        <div className="fixed inset-0 z-[120] flex flex-col bg-dark profile-mobile-push">
-          <div className="flex items-center justify-between border-b border-primary/35 bg-surface/90 px-4 py-3">
-            <button
-              type="button"
-              onClick={() => {
-                if (locationBackupRef.current) {
-                  setCustomerData(locationBackupRef.current);
+      {isEditingLocation && mobileMapFullscreen && (
+        <MobileMapEditor
+          initialLatitude={customerData.latitude}
+          initialLongitude={customerData.longitude}
+          zones={allZones}
+          services={deliveryServices}
+          showVisualZones={showDebugMap}
+          onConfirm={(data) => {
+            const currentLabel = customerData.address_label;
+            const currentType = activeAddressType;
+            const updatedData = {
+              latitude: data.latitude,
+              longitude: data.longitude,
+              city: data.city,
+              area: data.area,
+              street: data.street,
+              building_number: data.buildingNumber,
+              address_label: currentLabel,
+              address_type: currentType
+            };
+            setCustomerData(prev => ({ ...prev, ...updatedData }));
+            saveSharedAddress(updatedData);
+            setActiveAddressType(currentType);
+            setIsEditingLocation(false);
+            setMobileMapFullscreen(false);
+
+            // Persist to database immediately to ensure no data loss
+            const phone = filterDigits(customerData.phone || '');
+            if (phone) {
+              void findCustomerIdByPhone(phone).then(async (cid) => {
+                if (cid) {
+                  const fp = getOrCreateDeviceFingerprint();
+                  const fullPayload = {
+                    latitude: data.latitude,
+                    longitude: data.longitude,
+                    city: data.city,
+                    area: data.area,
+                    street: data.street,
+                    building_number: data.buildingNumber as any,
+                    apartment: customerData.apartment || null,
+                    floor: customerData.floor || null,
+                    landmark: customerData.landmark || null,
+                    house_name: customerData.house_name || null,
+                    company_name: customerData.company_name || null,
+                    address_label: currentLabel || null,
+                    address_type: currentType || 'apartment',
+                    device_fingerprint: fp,
+                    updated_at: new Date().toISOString()
+                  };
+
+                  // Update main customer address record
+                  await supabase.from('customers').update(fullPayload).eq('id', cid);
+
+                  // If we are on a named saved address tab, update that as well
+                  if (currentLabel && currentLabel.trim()) {
+                    await supabase.from('customer_saved_addresses').update({
+                      latitude: data.latitude,
+                      longitude: data.longitude,
+                      city: data.city,
+                      area: data.area,
+                      street: data.street,
+                      building_number: data.buildingNumber as any,
+                      apartment: customerData.apartment || null,
+                      floor: customerData.floor || null,
+                      landmark: customerData.landmark || null,
+                      house_name: customerData.house_name || null,
+                      company_name: customerData.company_name || null,
+                      address_type: currentType || 'apartment'
+                    }).eq('customer_id', cid).eq('label', currentLabel);
+                    
+                    // Refresh server address tabs to keep UI in sync
+                    void loadServerAddressTabs(cid);
+                  }
                 }
-                setIsEditingLocation(false);
-                setMobileMapFullscreen(false);
-              }}
-              className="rounded-lg border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-black text-white"
-            >
-              {language === 'ar' ? 'رجوع' : 'Back'}
-            </button>
-            <h3 className="text-sm font-black text-white">
-              {language === 'ar' ? 'تحديد الموقع' : 'Select location'}
-            </h3>
-            <button
-              type="button"
-              onClick={async () => {
-                if (customerData.latitude && customerData.longitude) {
-                  await reverseGeocodeAndSetAddress(customerData.latitude, customerData.longitude);
-                }
-                setIsEditingLocation(false);
-                setMobileMapFullscreen(false);
-              }}
-              className="rounded-lg bg-primary px-3 py-1.5 text-xs font-black text-white"
-            >
-              {language === 'ar' ? 'حفظ' : 'Save'}
-            </button>
-          </div>
-          <div className="flex-1 p-3">
-            <InteractiveMap
-              latitude={customerData.latitude}
-              longitude={customerData.longitude}
-              onLocationChange={handleLocationChange}
-              onAddressChange={handleAddressChange}
-              isEditing={true}
-              zones={showDebugMap ? allZones : []}
-              services={showDebugMap ? deliveryServices : []}
-              className="h-full"
-            />
-          </div>
-        </div>
+              });
+            }
+          }}
+          onCancel={() => {
+            if (locationBackupRef.current) {
+              setCustomerData(locationBackupRef.current);
+            }
+            setIsEditingLocation(false);
+            setMobileMapFullscreen(false);
+          }}
+        />
       )}
+
+      <TimePicker
+        isOpen={pickupCustomPickerOpen}
+        onClose={() => setPickupCustomPickerOpen(false)}
+        onConfirm={(h, m, ampm) => {
+          setPickupCustomHour(h);
+          setPickupCustomMinute(m);
+          setPickupCustomAmPm(ampm);
+          
+          const now = new Date();
+          const hour24 = (() => {
+            const val = h % 12;
+            return ampm === 'PM' ? val + 12 : val;
+          })();
+          const target = new Date();
+          target.setHours(hour24, m, 0, 0);
+          const isTomorrow = target.getTime() <= now.getTime();
+          
+          const dayLabel = language === 'ar' 
+            ? (isTomorrow ? 'غداً' : 'اليوم') 
+            : (isTomorrow ? 'Tomorrow' : 'Today');
+
+          const label =
+            language === 'ar'
+              ? `موعد الاستلام: ${dayLabel} - ${h}:${m.toString().padStart(2, '0')} ${ampm === 'PM' ? 'م' : 'ص'}`
+              : `Pickup time: ${dayLabel} - ${h}:${m.toString().padStart(2, '0')} ${ampm}`;
+          
+          setPickupCustomConfirmedLabel(label);
+          setPickupSlot('custom'); // Update actual slot only on confirmation
+          setPickupCommitmentAccepted(false);
+          setPickupCustomPickerOpen(false);
+        }}
+        initialHour={pickupCustomHour}
+        initialMinute={pickupCustomMinute}
+        initialAmPm={pickupCustomAmPm}
+        language={language}
+      />
+
       <style>{`
         @keyframes checkoutSlideUp {
           0% {
@@ -2329,89 +2849,39 @@ export default function Checkout({
         addressNamePopoverPos &&
         (renameSavedTarget || (isCreatingCustomAddress && pendingAddressType && !renameSavedTarget)) &&
         createPortal(
-          <div
-            data-address-name-popover
-            className="rounded-lg border border-primary/45 bg-[hsl(var(--color-surface))]/98 p-2 shadow-2xl backdrop-blur-sm w-[min(13.5rem,calc(100vw-1.5rem))]"
-            style={{
-              position: 'fixed',
-              top: addressNamePopoverPos.top,
-              left: addressNamePopoverPos.left,
-              transform: 'translateX(-50%)',
-              zIndex: 450,
+          <AddressNamePopover
+            mode={renameSavedTarget ? 'rename' : 'create'}
+            language={language}
+            value={renameSavedTarget ? renameSavedInput : newAddressName}
+            onChange={(nextValue) => {
+              if (renameSavedTarget) {
+                setRenameSavedInput(nextValue);
+              } else {
+                setNewAddressName(nextValue);
+              }
             }}
-          >
-            {renameSavedTarget ? (
-              <>
-                <p className="text-[10px] font-black text-white text-right mb-1.5 leading-tight">
-                  {language === 'ar' ? 'تعديل الاسم' : 'Rename'}
-                </p>
-                <input
-                  type="text"
-                  value={renameSavedInput}
-                  onChange={(e) => setRenameSavedInput(e.target.value)}
-                  className="w-full bg-dark border border-primary/35 rounded-md px-2 py-1.5 text-white text-right focus:outline-none focus:border-primary text-xs font-bold"
-                  dir={language === 'ar' ? 'rtl' : 'ltr'}
-                  autoFocus
-                />
-                <div className="flex gap-1.5 flex-row-reverse mt-2">
-                  <button
-                    type="button"
-                    onClick={() => void renameSavedAddressTab(renameSavedTarget, renameSavedInput)}
-                    className="flex-1 py-1.5 rounded-md bg-primary hover:bg-primary/85 text-white text-[11px] font-black"
-                  >
-                    {language === 'ar' ? 'حفظ' : 'Save'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setRenameSavedTarget(null);
-                      setRenameSavedInput('');
-                      setAddressNamePopoverPos(null);
-                    }}
-                    className="flex-1 py-1.5 rounded-md border border-white/20 text-muted text-[11px] font-bold"
-                  >
-                    {language === 'ar' ? 'إلغاء' : 'Cancel'}
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <p className="text-[10px] font-black text-white text-right mb-1.5 leading-tight">
-                  {language === 'ar' ? 'اسم العنوان' : 'Address label'}
-                </p>
-                <input
-                  type="text"
-                  value={newAddressName}
-                  onChange={(e) => setNewAddressName(e.target.value)}
-                  className="w-full bg-dark border border-primary/35 rounded-md px-2 py-1.5 text-white text-right focus:outline-none focus:border-primary text-xs font-bold"
-                  placeholder={language === 'ar' ? 'الاسم' : 'Name'}
-                  dir={language === 'ar' ? 'rtl' : 'ltr'}
-                  autoFocus
-                />
-                <div className="flex gap-1.5 flex-row-reverse mt-2">
-                  <button
-                    type="button"
-                    onClick={() => pendingAddressType && void addTypedAddressTab(pendingAddressType, newAddressName)}
-                    className="flex-1 py-1.5 rounded-md bg-primary hover:bg-primary/85 text-white text-[11px] font-black"
-                  >
-                    {language === 'ar' ? 'حفظ' : 'Save'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsCreatingCustomAddress(false);
-                      setPendingAddressType(null);
-                      setNewAddressName('');
-                      setAddressNamePopoverPos(null);
-                    }}
-                    className="flex-1 py-1.5 rounded-md border border-white/20 text-muted text-[11px] font-bold"
-                  >
-                    {language === 'ar' ? 'إلغاء' : 'Cancel'}
-                  </button>
-                </div>
-              </>
-            )}
-          </div>,
+            onSave={() => {
+              if (renameSavedTarget) {
+                void renameSavedAddressTab(renameSavedTarget, renameSavedInput);
+                return;
+              }
+              if (pendingAddressType) {
+                void addTypedAddressTab(pendingAddressType, newAddressName);
+              }
+            }}
+            onCancel={() => {
+              if (renameSavedTarget) {
+                setRenameSavedTarget(null);
+                setRenameSavedInput('');
+              } else {
+                setIsCreatingCustomAddress(false);
+                setPendingAddressType(null);
+                setNewAddressName('');
+              }
+              setAddressNamePopoverPos(null);
+            }}
+            position={addressNamePopoverPos}
+          />,
           document.body
         )}
 

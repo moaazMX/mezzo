@@ -1,10 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
 import { supabase, DeviceCoupon, DeliveryZone, PolygonPoint, DeliveryZoneLayer, DeliveryService } from '../../lib/supabase';
+import { useRealtimeRefetch } from '../../hooks/useRealtimeSubscription';
 import { Lock, CreditCard, Save, Keyboard, RotateCcw, X, Upload, Loader2, Image as ImageIcon, Archive, MapPinned, Download, FolderUp, Users, MoreVertical } from 'lucide-react';
-import ZoneMapEditor from './ZoneMapEditor';
 import DeliveryServiceEditor from './DeliveryServiceEditor';
 import OperatorCustomerSearch from './OperatorCustomerSearch';
 import { deleteSlotBlob, getSlotBlob, saveSlotBlob } from '../../lib/slotStorage';
+import { buildRateArchivePayload, downloadRateArchiveJson } from '../../lib/rateArchiveJson';
+import { getPolygonCenter } from '../../lib/geoUtils';
 
 type SettingsPanelProps = {
   onNavigateToCustomerOrders?: (phone: string, name?: string) => void;
@@ -14,6 +16,8 @@ type SettingsPanelProps = {
 };
 
 export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateToOrder, focusCustomerPhone, focusCustomerToken }: SettingsPanelProps) {
+  const zoneCreateInFlightRef = useRef(false);
+  const serviceCreateInFlightRef = useRef(false);
   const [instantNumber, setInstantNumber] = useState('');
   const [oldPassword, setOldPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -32,6 +36,7 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
   const [logoImageUrl, setLogoImageUrl] = useState<string>('');
   const [isUploadingLogo, setIsUploadingLogo] = useState(false);
   const [isArchiving, setIsArchiving] = useState(false);
+  const [isExportingArchive, setIsExportingArchive] = useState(false);
   const [showArchiveModal, setShowArchiveModal] = useState(false);
   const logoFileInputRef = useRef<HTMLInputElement>(null);
   const [couponSecretCode, setCouponSecretCode] = useState('');
@@ -55,7 +60,6 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
   const [loadingRecipients, setLoadingRecipients] = useState(false);
   const [deliveryZones, setDeliveryZones] = useState<DeliveryZone[]>([]);
   const [loadingZones, setLoadingZones] = useState(false);
-  const [showZoneMap, setShowZoneMap] = useState(false);
   const [deliveryServices, setDeliveryServices] = useState<DeliveryService[]>([]);
   const [loadingServices, setLoadingServices] = useState(false);
   const [showServiceEditor, setShowServiceEditor] = useState(false);
@@ -91,6 +95,14 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
       window.removeEventListener('open-logo-upload', handleOpenLogoUpload);
     };
   }, []);
+
+  useRealtimeRefetch(
+    'op-settings',
+    ['settings', 'device_coupons', 'delivery_zones', 'delivery_services', 'delivery_zone_layers'],
+    () => {
+      void fetchSettings();
+    }
+  );
 
   const fetchSettings = async () => {
     const { data } = await supabase
@@ -253,9 +265,16 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
               : zone.polygon_points)
             : [];
 
+          const branch_location = zone.branch_location
+            ? (typeof zone.branch_location === 'string'
+              ? JSON.parse(zone.branch_location)
+              : zone.branch_location)
+            : null;
+
           return {
             ...zone,
             polygon_points: parsedPoints,
+            branch_location,
             layers: layersByZone[zone.id] || []
           } as DeliveryZone;
         });
@@ -800,7 +819,10 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
     polygon_points: PolygonPoint[];
     is_active: boolean;
     base_delivery_price?: number;
+    branch_location?: PolygonPoint | null;
   }) => {
+    if (zoneCreateInFlightRef.current) return;
+    zoneCreateInFlightRef.current = true;
     setLoadingZones(true);
     try {
       // Validate polygon_points
@@ -860,6 +882,7 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
       showMessage(errorMessage, 'error');
       throw error;
     } finally {
+      zoneCreateInFlightRef.current = false;
       setLoadingZones(false);
     }
   };
@@ -907,9 +930,12 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
         updates.max_lng = bounds.maxLng;
       }
 
+      // Strip branch_location from DB payload (stored in localStorage instead)
+      const { branch_location: _bl, ...dbUpdates } = updates as any;
+
       const { error } = await supabase
         .from('delivery_zones')
-        .update(updates)
+        .update(dbUpdates)
         .eq('id', zoneId);
 
       if (error) {
@@ -1071,6 +1097,8 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
       order_index?: number;
     }[];
   }) => {
+    if (serviceCreateInFlightRef.current) return;
+    serviceCreateInFlightRef.current = true;
     setLoadingServices(true);
     try {
       if (!serviceData.name.trim()) {
@@ -1082,12 +1110,29 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
         is_active: serviceData.is_active
       };
 
-      if (serviceData.branch_location) {
-        payload.branch_location = {
-          lat: Number(serviceData.branch_location.lat),
-          lng: Number(serviceData.branch_location.lng)
-        };
+      let branchLocation = serviceData.branch_location;
+      const layersToCreate = [];
+      if (serviceData.initialLayers && serviceData.initialLayers.length > 0) {
+        layersToCreate.push(...serviceData.initialLayers.filter(l => l.polygon_points.length >= 3));
+      } else if (serviceData.initialLayer && serviceData.initialLayer.polygon_points.length >= 3) {
+        layersToCreate.push(serviceData.initialLayer);
       }
+
+      if (!branchLocation && layersToCreate.length > 0) {
+        const pts = layersToCreate[0].polygon_points;
+        if (pts.length >= 3) {
+          branchLocation = getPolygonCenter(pts);
+        }
+      }
+
+      if (!branchLocation) {
+        throw new Error('يجب تحديد موقع الفرع (دبوس المركز) أو رسم طبقة تحتوي على 3 نقاط على الأقل');
+      }
+
+      payload.branch_location = {
+        lat: Number(branchLocation.lat),
+        lng: Number(branchLocation.lng)
+      };
 
       const { data: created, error } = await supabase
         .from('delivery_services')
@@ -1098,14 +1143,6 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
       if (error || !created) {
         console.error('Supabase insert error (delivery_service):', error);
         throw new Error(error?.message || 'حدث خطأ أثناء حفظ خدمة التوصيل');
-      }
-
-      // If initial layers were provided, create them and link to this service (لا نكرر الطبقة: نستخدم initialLayers فقط إن وُجدت)
-      const layersToCreate = [];
-      if (serviceData.initialLayers && serviceData.initialLayers.length > 0) {
-        layersToCreate.push(...serviceData.initialLayers.filter(l => l.polygon_points.length >= 3));
-      } else if (serviceData.initialLayer && serviceData.initialLayer.polygon_points.length >= 3) {
-        layersToCreate.push(serviceData.initialLayer);
       }
 
       if (layersToCreate.length > 0) {
@@ -1139,6 +1176,7 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
       showMessage(errorMessage, 'error');
       throw error;
     } finally {
+      serviceCreateInFlightRef.current = false;
       setLoadingServices(false);
     }
   };
@@ -1799,7 +1837,8 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
               item_name: item.item_name,
               quantity: item.quantity,
               unit_price: item.unit_price,
-              subtotal: item.subtotal
+              subtotal: item.subtotal,
+              rate_discount_percent: item.rate_discount_percent ?? null,
             }));
 
             const { error: itemsInsertError } = await supabase
@@ -1896,6 +1935,21 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
         'error'
       );
       setIsArchiving(false);
+    }
+  };
+
+  const handleExportArchiveJson = async () => {
+    setIsExportingArchive(true);
+    try {
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      const payload = await buildRateArchivePayload(`archive-${stamp}`);
+      downloadRateArchiveJson(payload, payload.meta.name);
+      showMessage(`تم تصدير ${payload.tables.archive_orders.length} طلب من الأرشيف`, 'success');
+    } catch (error) {
+      console.error('Error exporting archive JSON:', error);
+      showMessage('تعذر تصدير الأرشيف', 'error');
+    } finally {
+      setIsExportingArchive(false);
     }
   };
 
@@ -2594,8 +2648,8 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
         </div>
 
         <p className="text-sm text-gray-300 text-right mb-4">
-          هنا تقوم بتعريف فروع / خدمات التوصيل بشكل مستقل عن زونات الطلب. كل خدمة تملك دبوس فرع في الخريطة
-          وطبقات تسعير (بوليجونات صفراء) حولها.
+          هنا تقوم بتعريف فروع / خدمات التوصيل وطبقات التسعير (بوليجونات صفراء) حول كل فرع.
+          يمكنك أيضاً إضافة زونات تعطيل (حمراء) من داخل محرر الخريطة لمنع الطلب في مناطق محددة حتى لو كانت داخل طبقة تسعير.
         </p>
 
         <div className="bg-gray-950/40 border border-yellow-500/40 rounded-lg max-h-72 overflow-y-auto custom-scrollbar">
@@ -2640,83 +2694,6 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
         </div>
       </div>
 
-      {/* Delivery Zones Settings */}
-      <div className="bg-gray-900/50 border-2 border-purple-500/30 rounded-xl p-6">
-        <div className="flex items-center justify-between mb-6">
-          <button
-            onClick={() => setShowZoneMap(true)}
-            className="bg-green-600 hover:bg-green-500 text-white px-6 py-3 rounded-lg flex items-center gap-2 transition-colors font-bold"
-          >
-            <MapPinned className="w-5 h-5" />
-            <span>فتح الخريطة التفاعلية</span>
-          </button>
-          <div className="flex items-center justify-end gap-2">
-            <h3 className="text-2xl font-bold text-white">مناطق التوصيل (Delivery Zones)</h3>
-            <MapPinned className="w-6 h-6 text-purple-400" />
-          </div>
-        </div>
-
-        <p className="text-sm text-gray-300 text-right mb-4">
-          حدد المناطق التي يُسمح فيها بالطلب عن طريق الخريطة التفاعلية. اضغط على الخريطة لإضافة نقاط وتشكيل الزون.
-          أي عميل يكون موقعه خارج كل الزونات النشطة لن يتمكن من إكمال الطلب.
-        </p>
-
-        <div className="bg-gray-950/40 border border-purple-500/30 rounded-lg max-h-72 overflow-y-auto custom-scrollbar">
-          {loadingZones ? (
-            <div className="py-4 text-center text-gray-300 text-sm">
-              جاري تحميل الزونات...
-            </div>
-          ) : deliveryZones.length === 0 ? (
-            <div className="py-4 text-center text-gray-400 text-sm">
-              لا توجد زونات بعد. يجب إضافة زون واحد على الأقل ليتمكن العملاء من الطلب.
-            </div>
-          ) : (
-            <div className="space-y-2 p-3">
-              {deliveryZones.map(zone => (
-                <div
-                  key={zone.id}
-                  className="bg-gray-900/50 border border-purple-500/30 rounded-lg p-3 flex items-center justify-between"
-                >
-                  <div className="flex-1 text-right">
-                    <div className="font-bold text-white">{zone.name}</div>
-                    <div className="text-xs text-gray-400 mt-1">
-                      {zone.polygon_points?.length || 0} نقطة • {new Date(zone.created_at).toLocaleDateString('ar-EG')}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`px-3 py-1 rounded-full text-xs font-bold ${zone.is_active ? 'bg-green-700 text-green-100' : 'bg-gray-700 text-gray-200'
-                        }`}
-                    >
-                      {zone.is_active ? 'فعال' : 'معطل'}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => handleToggleZone(zone)}
-                      className={`px-3 py-1 rounded text-xs font-bold ${zone.is_active ? 'bg-yellow-600 hover:bg-yellow-500' : 'bg-green-600 hover:bg-green-500'
-                        } text-white`}
-                    >
-                      {zone.is_active ? 'تعطيل' : 'تفعيل'}
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Zone Map Editor Modal */}
-      {showZoneMap && (
-        <ZoneMapEditor
-          zones={deliveryZones}
-          onZoneCreate={handleSaveZoneFromMap}
-          onZoneUpdate={handleUpdateZone}
-          onZoneDelete={handleDeleteZone}
-          onClose={() => setShowZoneMap(false)}
-        />
-      )}
-
       {/* Delivery Service Editor Modal */}
       {showServiceEditor && (
         <DeliveryServiceEditor
@@ -2728,7 +2705,13 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
           onLayerCreate={handleCreateServiceLayer}
           onLayerUpdate={handleUpdateServiceLayer}
           onLayerDelete={handleDeleteServiceLayer}
-          onClose={() => setShowServiceEditor(false)}
+          onZoneCreate={handleSaveZoneFromMap}
+          onZoneUpdate={handleUpdateZone}
+          onZoneDelete={handleDeleteZone}
+          onClose={() => {
+            setShowServiceEditor(false);
+            void fetchDeliveryZones();
+          }}
         />
       )}
 
@@ -3225,6 +3208,16 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
           >
             <Archive className="w-5 h-5" />
             إنهاء اليوم ونقل إلى الأرشيف
+          </button>
+
+          <button
+            type="button"
+            onClick={() => void handleExportArchiveJson()}
+            disabled={isExportingArchive}
+            className="w-full bg-green-600 hover:bg-green-500 disabled:bg-gray-700 disabled:cursor-not-allowed text-white py-3 rounded-lg transition-colors font-bold flex items-center justify-center gap-2"
+          >
+            {isExportingArchive ? <Loader2 className="w-5 h-5 animate-spin" /> : <Download className="w-5 h-5" />}
+            تصدير الأرشيف (JSON)
           </button>
         </div>
       </div>

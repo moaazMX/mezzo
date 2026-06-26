@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { getOrCreateDeviceFingerprint } from '../lib/deviceFingerprint';
+import { findCustomerIdByPhone } from '../lib/customerPhone';
 
 interface CheatCodeInputProps {
   couponSecretCode?: string | null;
@@ -78,30 +79,33 @@ export default function CheatCodeInput({
       let linkedCustomerName: string | null = null;
       let linkedCustomerPhone: string | null = null;
       if (savedPhone) {
-        const { data: customerRow } = await supabase
-          .from('customers')
-          .select('id, name, phone')
-          .eq('phone', savedPhone)
-          .maybeSingle();
-        if (customerRow?.id) {
-          linkedCustomerId = customerRow.id;
-          linkedCustomerName = (customerRow as any).name || null;
-          linkedCustomerPhone = (customerRow as any).phone || savedPhone;
+        const customerId = await findCustomerIdByPhone(savedPhone);
+        if (customerId) {
+          const { data: customerRow } = await supabase
+            .from('customers')
+            .select('id, name, phone')
+            .eq('id', customerId)
+            .maybeSingle();
+          if (customerRow?.id) {
+            linkedCustomerId = customerRow.id;
+            linkedCustomerName = (customerRow as any).name || null;
+            linkedCustomerPhone = (customerRow as any).phone || savedPhone;
+          }
         }
       }
 
       const normalizePhone = (p?: string | null) => (p || '').replace(/\D/g, '').replace(/^0+/, '');
       const existingForCurrentAccount = linkedCustomerId
         ? await supabase
-            .from('device_coupons')
-            .select('*')
-            .eq('code', codeExact)
-            .or(`customer_id.eq.${linkedCustomerId},device_fingerprint.eq.${fingerprint},customer_phone.eq.${linkedCustomerPhone || ''}`)
+          .from('device_coupons')
+          .select('*')
+          .eq('code', codeExact)
+          .or(`customer_id.eq.${linkedCustomerId},device_fingerprint.eq.${fingerprint},customer_phone.eq.${linkedCustomerPhone || ''}`)
         : await supabase
-            .from('device_coupons')
-            .select('*')
-            .eq('device_fingerprint', fingerprint)
-            .eq('code', codeExact);
+          .from('device_coupons')
+          .select('*')
+          .eq('device_fingerprint', fingerprint)
+          .eq('code', codeExact);
       const { data: existingRows, error: existingErr } = existingForCurrentAccount;
 
       if (existingErr) {

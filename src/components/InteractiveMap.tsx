@@ -33,13 +33,19 @@ const LEAFLET_DARK_TILE_CSS = `
 interface InteractiveMapProps {
   latitude: number;
   longitude: number;
+  zoom?: number;
+  onZoomChange?: (zoom: number) => void;
   onLocationChange: (lat: number, lng: number) => void;
   onAddressChange?: (address: { street: string; area: string; city: string; buildingNumber: string }) => void;
+  onDragStateChange?: (isDragging: boolean) => void;
   className?: string;
   containerHeight?: string | number;
   isEditing?: boolean;
   zones?: DeliveryZone[];
   services?: DeliveryService[];
+  mapType?: 'streets' | 'satellite';
+  hideInternalUI?: boolean;
+  hideFixedMarker?: boolean;
 }
 
 // Helper component to sync map center and zoom
@@ -75,21 +81,31 @@ function MapSizeInvalidator() {
 
 function MapEventsHandler({
   onLocationChange,
+  onDragStart,
   onDragEnd,
   onZoomChange,
   isEditing
 }: {
   onLocationChange: (lat: number, lng: number) => void,
+  onDragStart?: () => void,
   onDragEnd: (lat: number, lng: number) => void,
   onZoomChange: (zoom: number) => void,
   isEditing: boolean
 }) {
   const map = useMapEvents({
+    dragstart: () => {
+      if (!isEditing) return;
+      onDragStart?.();
+    },
+    dragend: () => {
+      if (!isEditing) return;
+      const center = map.getCenter();
+      onDragEnd(center.lat, center.lng);
+    },
     moveend: () => {
       if (!isEditing) return;
       const center = map.getCenter();
       onLocationChange(center.lat, center.lng);
-      onDragEnd(center.lat, center.lng);
     },
     zoomend: () => {
       if (!isEditing) return;
@@ -102,17 +118,23 @@ function MapEventsHandler({
 export default function InteractiveMap({
   latitude,
   longitude,
+  zoom,
+  onZoomChange,
   onLocationChange,
   onAddressChange,
+  onDragStateChange,
   className = '',
   containerHeight = '400px',
   isEditing = false,
   zones = [],
-  services = []
+  services = [],
+  mapType = 'streets',
+  hideInternalUI = false,
+  hideFixedMarker = false
 }: InteractiveMapProps) {
   const { language } = useLanguage();
   const [mapCenter, setMapCenter] = useState<[number, number]>([latitude, longitude]);
-  const [zoomLevel, setZoomLevel] = useState(15);
+  const [zoomLevel, setZoomLevel] = useState(zoom ?? 15);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
@@ -123,12 +145,17 @@ export default function InteractiveMap({
   const moveToFirstResultRef = useRef(false);
   const tileUrl = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
 
-  // Sync internal state with props ONLY if we are not actively editing
-  // or if the props drastically changed (like initialization)
+  // Sync center/zoom from parent when controlled externally (e.g. MobileMapEditor)
   useEffect(() => {
-    // Don't auto-sync if we are in the middle of dragging/editing
-    // This prevents the parent from forcing the map back to the prop coordinates while the user is still interacting
-  }, [latitude, longitude]);
+    if (!isEditing) return;
+    setMapCenter([latitude, longitude]);
+  }, [latitude, longitude, isEditing]);
+
+  useEffect(() => {
+    if (zoom !== undefined) {
+      setZoomLevel(zoom);
+    }
+  }, [zoom]);
 
   const reverseGeocode = async (lat: number, lng: number) => {
     try {
@@ -338,8 +365,15 @@ export default function InteractiveMap({
             setMapCenter([lat, lng]);
             onLocationChange(lat, lng);
           }}
-          onDragEnd={(lat, lng) => reverseGeocode(lat, lng)}
-          onZoomChange={(zoom) => setZoomLevel(zoom)}
+          onDragStart={() => onDragStateChange?.(true)}
+          onDragEnd={(lat, lng) => {
+            onDragStateChange?.(false);
+            reverseGeocode(lat, lng);
+          }}
+          onZoomChange={(newZoom) => {
+            setZoomLevel(newZoom);
+            onZoomChange?.(newZoom);
+          }}
           isEditing={isEditing}
         />
 
@@ -387,18 +421,21 @@ export default function InteractiveMap({
       </MapContainer>
 
       {/* Fixed Marker perfectly centered */}
-      <div
-        className="absolute top-1/2 left-1/2 z-[400] pointer-events-none"
-        style={{ transform: 'translate(-50%, -100%)' }}
-      >
-        <div className="relative mb-[2px]">
-          <MapPin className="w-9 h-9 text-red-600 drop-shadow-2xl" fill="currentColor" />
-          <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-2 h-2 bg-red-800 rounded-full blur-[1px]"></div>
+      {!hideFixedMarker && (
+        <div
+          className="absolute top-1/2 left-1/2 z-[400] pointer-events-none"
+          style={{ transform: 'translate(-50%, -100%)' }}
+        >
+          <div className="relative mb-[2px]">
+            <MapPin className="w-9 h-9 text-red-600 drop-shadow-2xl" fill="currentColor" />
+            <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-2 h-2 bg-red-800 rounded-full blur-[1px]"></div>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Search bar */}
-      <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[500] w-[92%] max-w-xl" ref={searchBoxRef}>
+      {!hideInternalUI && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[500] w-[92%] max-w-xl" ref={searchBoxRef}>
         <div className="relative">
           <div className="flex items-center bg-[#1e1e1e] rounded-2xl border border-white/10 shadow-2xl overflow-hidden backdrop-blur-xl">
             <button
@@ -468,7 +505,10 @@ export default function InteractiveMap({
           <p className="mt-2 text-xs text-red-400 text-right bg-black/60 inline-block px-3 py-1 rounded-full shadow-lg">{searchError}</p>
         )}
       </div>
+      )}
 
+      {!hideInternalUI && (
+        <>
       {/* Zoom Controls */}
       <div className="absolute top-1/2 -translate-y-1/2 right-2 flex flex-col gap-2 z-[500]">
         <button
@@ -504,6 +544,8 @@ export default function InteractiveMap({
       <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-2 py-1 rounded z-[500]">
         {language === 'ar' ? 'اسحب الخريطة لتغيير الموقع' : 'Drag map to change location'}
       </div>
+        </>
+      )}
 
       <style dangerouslySetInnerHTML={{
         __html: `

@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { supabase } from '../../lib/supabase';
+import { useRealtimeRefetch } from '../../hooks/useRealtimeSubscription';
 import { TrendingUp, Package, XCircle, DollarSign, ShoppingBag, MapPin } from 'lucide-react';
 
 interface Analytics {
@@ -25,13 +26,24 @@ export default function Analytics() {
     topAreas: []
   });
   const [loading, setLoading] = useState(true);
+  const hasLoadedAnalyticsRef = useRef(false);
 
   useEffect(() => {
-    fetchAnalytics();
+    void fetchAnalytics(false);
   }, []);
 
-  const fetchAnalytics = async () => {
-    setLoading(true);
+  useRealtimeRefetch(
+    'op-analytics',
+    ['orders', 'archive_orders', 'order_items', 'archive_order_items', 'categories', 'items'],
+    () => {
+      void fetchAnalytics(true);
+    }
+  );
+
+  const fetchAnalytics = async (silent = false) => {
+    if (!silent && !hasLoadedAnalyticsRef.current) {
+      setLoading(true);
+    }
 
     const [{ data: orders }, { data: archiveOrders }] = await Promise.all([
       supabase
@@ -47,6 +59,7 @@ export default function Analytics() {
 
     const allOrders = [...(orders || []), ...(archiveOrders || [])];
     if (allOrders.length === 0) {
+      hasLoadedAnalyticsRef.current = true;
       setLoading(false);
       return;
     }
@@ -139,6 +152,7 @@ export default function Analytics() {
       topAreas
     });
 
+    hasLoadedAnalyticsRef.current = true;
     setLoading(false);
   };
 

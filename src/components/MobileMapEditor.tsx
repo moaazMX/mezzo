@@ -298,7 +298,7 @@ export default function MobileMapEditor({
               }));
             }}
             isEditing={true}
-            zones={showVisualZones ? zones : []}
+            zones={showVisualZones ? (zones || []).filter(z => z.is_active !== false) : []}
             services={showVisualZones ? services : []}
             className="h-full w-full"
             containerHeight="100%"
@@ -323,26 +323,8 @@ export default function MobileMapEditor({
             </div>
           </div>
 
-          {/* Floating Action Buttons */}
-          <div className="absolute bottom-44 left-4 flex flex-col gap-3 z-[1502]">
-            {/* Zoom Controls */}
-            <div className="flex flex-col gap-2">
-              <button
-                type="button"
-                onClick={() => setZoom(prev => Math.min(prev + 1, 18))}
-                className="w-12 h-12 flex items-center justify-center rounded-2xl bg-surface/90 backdrop-blur-xl text-white border border-white/10 shadow-2xl active:scale-95 transition-all"
-              >
-                <Plus className="w-5 h-5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setZoom(prev => Math.max(prev - 1, 1))}
-                className="w-12 h-12 flex items-center justify-center rounded-2xl bg-surface/90 backdrop-blur-xl text-white border border-white/10 shadow-2xl active:scale-95 transition-all"
-              >
-                <Minus className="w-5 h-5" />
-              </button>
-            </div>
-
+          {/* Re-center — left */}
+          <div className="absolute bottom-44 left-4 z-[1502]">
             <button
               type="button"
               onClick={() => {
@@ -363,6 +345,24 @@ export default function MobileMapEditor({
             >
               <Navigation className="w-6 h-6 group-active:translate-x-1 group-active:-translate-y-1 transition-transform" />
               <div className="absolute inset-0 bg-white/10 opacity-0 group-active:opacity-100 transition-opacity" />
+            </button>
+          </div>
+
+          {/* Zoom — right */}
+          <div className="absolute bottom-44 right-4 flex flex-col gap-2 z-[1502]">
+            <button
+              type="button"
+              onClick={() => setZoom(prev => Math.min(prev + 1, 18))}
+              className="w-12 h-12 flex items-center justify-center rounded-2xl bg-surface/90 backdrop-blur-xl text-white border border-white/10 shadow-2xl active:scale-95 transition-all"
+            >
+              <Plus className="w-5 h-5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setZoom(prev => Math.max(prev - 1, 1))}
+              className="w-12 h-12 flex items-center justify-center rounded-2xl bg-surface/90 backdrop-blur-xl text-white border border-white/10 shadow-2xl active:scale-95 transition-all"
+            >
+              <Minus className="w-5 h-5" />
             </button>
           </div>
 
@@ -393,8 +393,8 @@ export default function MobileMapEditor({
                 });
               }}
               className={`w-full py-4 rounded-2xl font-black text-lg shadow-xl transition-all flex items-center justify-center gap-2 ${isInsideZone
-                  ? 'bg-primary hover:bg-primary/90 text-white shadow-primary/20 active:scale-[0.98]'
-                  : 'bg-gray-600 text-white/50 cursor-not-allowed opacity-80'
+                ? 'bg-primary hover:bg-primary/90 text-white shadow-primary/20 active:scale-[0.98]'
+                : 'bg-gray-600 text-white/50 cursor-not-allowed opacity-80'
                 }`}
             >
               {isInsideZone

@@ -1,12 +1,20 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { X, Package, Clock, Truck, CheckCircle, XCircle, AlertTriangle, StickyNote, Globe, Moon, Sun, Edit2, Save, Archive, TicketPercent, MoreVertical, MessageSquare, Lock, Plus, ChevronRight, Building, Home, Briefcase } from 'lucide-react';
-import { supabase, Order, OrderItem, CustomerNote, Customer, DeviceCoupon } from '../lib/supabase';
+import { createPortal } from 'react-dom';
+import { CheckCircle, X, Package, Clock, Truck, AlertTriangle, StickyNote, Globe, Moon, Sun, Edit2, Save, Archive, TicketPercent, MoreVertical, MessageSquare, Lock, Plus, ChevronRight, ChevronLeft, Building, Home, Briefcase, XCircle, Pencil, LogOut } from 'lucide-react';
+import MobileMapEditor from './MobileMapEditor';
+import { saveSharedAddress, getSharedAddress, subscribeToAddressSync, saveSharedAddressTabs, getSharedAddressTabs } from '../lib/addressSync';
+import { fetchDeliveryZonesAndServices } from '../lib/deliveryMatch';
+import { supabase, Order, OrderItem, CustomerNote, Customer, DeviceCoupon, CustomerData, SavedAddressTab, AddressType, DeliveryZone, DeliveryService } from '../lib/supabase';
 import { getOrCreateDeviceFingerprint } from '../lib/deviceFingerprint';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { generateEasyRecoveryCode, hashPhonePassword, hashRecoveryCode } from '../lib/phonePassword';
+import { findCustomerIdByPhone, findCustomerAuthByPhone, ensureCustomerByPhone } from '../lib/customerPhone';
 import { isTouchPhoneChrome } from '../lib/viewportUi';
 import InteractiveMap from './InteractiveMap';
+import TimePicker from './TimePicker';
+import AddressNamePopover from './AddressNamePopover';
+import { formatDeadline } from '../lib/dateUtils';
 
 interface CustomerProfileProps {
   isOpen: boolean;
@@ -14,7 +22,9 @@ interface CustomerProfileProps {
   customerPhone: string;
   highlightOrderId?: string | null;
   initialTab?: 'settings' | 'orders';
-  onMobileSubflowChange?: (isActive: boolean) => void;
+  onPhoneValidated?: (phone: string) => void | Promise<void>;
+  onSettingsViewChange?: (view: string) => void;
+  onStartOrderEdit?: (order: OrderWithDetails) => void;
 }
 
 interface OrderWithDetails extends Order {
@@ -24,32 +34,43 @@ interface OrderWithDetails extends Order {
   isArchived?: boolean;
 }
 
-type ProfileSavedAddressTab = {
-  id: string;
-  label: string;
-  type: 'apartment' | 'house' | 'workplace';
-  data: ProfileAddressDraftData;
-};
+function normalizeSavedAddressLabelKey(label: string): string {
+  return label.trim().toLowerCase();
+}
 
-type ProfileAddressDraftData = {
-  street: string;
-  area: string;
-  city: string;
-  building_number: string;
-  floor: string;
-  apartment: string;
-  house_name: string;
-  company_name: string;
-  landmark: string;
-  latitude?: number;
-  longitude?: number;
-};
+function getReservedSavedAddressLabelKeys(): Set<string> {
+  const raw = ['شقة', 'منزل', 'مكان عمل', 'apartment', 'house', 'workplace'];
+  return new Set(raw.map(normalizeSavedAddressLabelKey));
+}
 
-export default function CustomerProfile({ isOpen, onClose, customerPhone, highlightOrderId, initialTab = 'settings', onMobileSubflowChange }: CustomerProfileProps) {
+function allocateUniqueSavedAddressLabel(rawLabel: string, savedTabs: SavedAddressTab[]): string {
+  const base = rawLabel.trim();
+  if (!base) return base;
+
+  const taken = new Set<string>();
+  for (const t of savedTabs) {
+    taken.add(normalizeSavedAddressLabelKey(t.label));
+  }
+  for (const k of getReservedSavedAddressLabelKeys()) {
+    taken.add(k);
+  }
+
+  let candidate = base;
+  let n = 2;
+  while (taken.has(normalizeSavedAddressLabelKey(candidate))) {
+    candidate = `${base} ${n}`;
+    n += 1;
+  }
+  return candidate;
+}
+
+
+export default function CustomerProfile({ isOpen, onClose, customerPhone, highlightOrderId, initialTab = 'settings', onPhoneValidated, onSettingsViewChange, onStartOrderEdit }: CustomerProfileProps) {
   const { language, setLanguage } = useLanguage();
   const { theme, toggleTheme } = useTheme();
   const [orders, setOrders] = useState<OrderWithDetails[]>([]);
   const [loading, setLoading] = useState(true);
+  const hasLoadedOrdersRef = useRef(false);
   const [cancelOrderId, setCancelOrderId] = useState<string | null>(null);
   const [cancelReason, setCancelReason] = useState('');
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
@@ -63,49 +84,37 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
   const [menuPosition, setMenuPosition] = useState<{ top: number; left?: number; right?: number }>({ top: 80, left: 16 });
   const [activeHighlightId, setActiveHighlightId] = useState<string | null>(null);
 
-  function normalizeProfileAddressLabelKey(label: string): string {
-    return label.trim().toLowerCase();
-  }
-
-  function getReservedProfileAddressLabelKeys(): Set<string> {
-    const raw = ['شقة', 'منزل', 'مكان عمل', 'apartment', 'house', 'workplace'];
-    return new Set(raw.map(normalizeProfileAddressLabelKey));
-  }
-
-  function allocateUniqueProfileAddressLabel(rawLabel: string, savedTabs: ProfileSavedAddressTab[]): string {
-    const base = rawLabel.trim();
-    if (!base) return base;
-
-    const taken = new Set<string>();
-    for (const t of savedTabs) {
-      taken.add(normalizeProfileAddressLabelKey(t.label));
-    }
-    for (const k of getReservedProfileAddressLabelKeys()) {
-      taken.add(k);
-    }
-
-    let candidate = base;
-    let n = 2;
-    while (taken.has(normalizeProfileAddressLabelKey(candidate))) {
-      candidate = `${base} ${n}`;
-      n += 1;
-    }
-    return candidate;
-  }
-
   const [profileCustomerId, setProfileCustomerId] = useState<string | null>(null);
   const [profileCustomer, setProfileCustomer] = useState<Partial<Customer> | null>(null);
-  const [settingsView, setSettingsView] = useState<'main' | 'account' | 'data' | 'addresses' | 'map'>('main');
+  const [settingsView, setSettingsViewInternal] = useState<'main' | 'account' | 'data' | 'addresses' | 'map' | 'add_account' | 'switch_accounts' | 'security' | 'coupons'>('main');
+
+  const setSettingsView = useCallback((view: 'main' | 'account' | 'data' | 'addresses' | 'map' | 'add_account' | 'switch_accounts' | 'security' | 'coupons') => {
+    setSettingsViewInternal(view);
+    onSettingsViewChange?.(view);
+  }, [onSettingsViewChange]);
+  const [savedAccounts, setSavedAccounts] = useState<{ name: string; phone: string }[]>([]);
+  const [logoutConfirm, setLogoutConfirm] = useState<{ name: string; phone: string } | null>(null);
+  const [accountMenuOpen, setAccountMenuOpen] = useState<string | null>(null);
+  const [accountEditBackTarget, setAccountEditBackTarget] = useState<'main' | 'switch_accounts'>('main');
+  const [viewingAccountPhone, setViewingAccountPhone] = useState<string | null>(null);
   const [profileSaving, setProfileSaving] = useState(false);
+  const [showDefaultTimePicker, setShowDefaultTimePicker] = useState(false);
+  const [defaultPickupTime, setDefaultPickupTime] = useState<string | null>(localStorage.getItem('default_pickup_time'));
+  const [profilePhoneError, setProfilePhoneError] = useState<string | null>(null);
+  const [isSwitchingAccount, setIsSwitchingAccount] = useState<string | null>(null);
+  const [editingCustomerId, setEditingCustomerId] = useState<string | null>(null);
+  const [isDeletingTime, setIsDeletingTime] = useState(false);
   const [showSecondaryProfilePhone, setShowSecondaryProfilePhone] = useState(false);
-  const [profileAddressType, setProfileAddressType] = useState<'apartment' | 'house' | 'workplace'>('apartment');
-  const [profileSavedAddressTabs, setProfileSavedAddressTabs] = useState<ProfileSavedAddressTab[]>([]);
+  const [profileAddressType, setProfileAddressType] = useState<AddressType>('apartment');
+  const [profileSavedAddressTabs, setProfileSavedAddressTabs] = useState<SavedAddressTab[]>([]);
+  const [showUpdateTimePicker, setShowUpdateTimePicker] = useState<string | null>(null); // orderId
   const [activeProfileAddressTabId, setActiveProfileAddressTabId] = useState('builtin-apartment');
-  const [, setProfileAddressTabsData] = useState<Record<string, ProfileAddressDraftData>>({});
   const [showProfileCustomAddressInput, setShowProfileCustomAddressInput] = useState(false);
   const [newProfileAddressName, setNewProfileAddressName] = useState('');
-  const [desktopAddressMapOverlayOpen, setDesktopAddressMapOverlayOpen] = useState(false);
-  const [profileDraft, setProfileDraft] = useState({
+  const [pendingProfileAddressType, setPendingProfileAddressType] = useState<'apartment' | 'house' | 'workplace' | null>(null);
+  const customAddressAnchorRef = useRef<HTMLDivElement | null>(null);
+  const [addressNamePopoverPos, setAddressNamePopoverPos] = useState<{ top: number; left: number } | null>(null);
+  const [profileDraft, setProfileDraft] = useState<CustomerData>({
     name: '',
     phone: '',
     secondary_phone: '',
@@ -118,8 +127,10 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
     house_name: '',
     company_name: '',
     landmark: '',
-    latitude: undefined as number | undefined,
-    longitude: undefined as number | undefined
+    latitude: undefined,
+    longitude: undefined,
+    address_type: 'apartment',
+    address_label: ''
   });
   const [hasPhonePassword, setHasPhonePassword] = useState(false);
   const [securityLoading, setSecurityLoading] = useState(false);
@@ -133,16 +144,113 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
   const [phoneChrome, setPhoneChrome] = useState(() =>
     typeof window !== 'undefined' ? isTouchPhoneChrome() : false
   );
+  const [deliveryZones, setDeliveryZones] = useState<DeliveryZone[]>([]);
+  const [deliveryServices, setDeliveryServices] = useState<DeliveryService[]>([]);
+  const [pickupTimerNow, setPickupTimerNow] = useState(() => Date.now());
+  const activeSavedPhone = filterDigits(
+    profileCustomer?.phone || profileDraft.phone || customerPhone || localStorage.getItem('customer_phone') || ''
+  );
+  const switchableAccountsCount = savedAccounts.filter((acc) => filterDigits(acc.phone || '') !== activeSavedPhone).length;
 
-  const [mobileProfileTabSheet, setMobileProfileTabSheet] = useState<ProfileSavedAddressTab | null>(null);
-  const [mobileProfileTabMenuPos, setMobileProfileTabMenuPos] = useState<{ top: number; left: number; width: number } | null>(null);
-  const [renameProfileTabTarget, setRenameProfileTabTarget] = useState<ProfileSavedAddressTab | null>(null);
-  const [renameProfileTabInput, setRenameProfileTabInput] = useState('');
-  const profileTabLongPressTimer = useRef<number | null>(null);
-  const profileTabLongPressConsumed = useRef(false);
-  const isFinePointerDesktop = typeof window !== 'undefined'
-    ? window.matchMedia('(hover: hover) and (pointer: fine)').matches
-    : true;
+  const fetchSavedAccounts = useCallback(async () => {
+    try {
+      const fp = getOrCreateDeviceFingerprint();
+      const activePhone = filterDigits(
+        customerPhone || profileCustomer?.phone || profileDraft.phone || localStorage.getItem('customer_phone') || ''
+      );
+
+      const { data, error } = await supabase
+        .from('customers')
+        .select('name, phone')
+        .eq('device_fingerprint', fp)
+        .order('updated_at', { ascending: false })
+        .limit(5);
+
+      if (error) throw error;
+
+      const byFingerprint = (data || []) as { name: string; phone: string }[];
+      let activeAccount: { name: string; phone: string } | null = null;
+
+      // Fallback: if active phone exists but is missing in fingerprint results,
+      // fetch it explicitly so the UI always reflects the currently active account.
+      if (activePhone && !byFingerprint.some((acc) => filterDigits(acc.phone || '') === activePhone)) {
+        const { data: activeRow, error: activeErr } = await supabase
+          .from('customers')
+          .select('name, phone')
+          .eq('phone', activePhone)
+          .maybeSingle();
+        if (!activeErr && activeRow) {
+          activeAccount = activeRow as { name: string; phone: string };
+        }
+      }
+
+      const deduped = Array.from(
+        new Map([...(activeAccount ? [activeAccount] : []), ...byFingerprint].map((acc) => [acc.phone, acc])).values()
+      );
+      setSavedAccounts(deduped);
+      localStorage.setItem('mx_saved_accounts_cache', JSON.stringify(deduped));
+    } catch (e) {
+      console.error('Failed to fetch saved accounts:', e);
+    }
+  }, [customerPhone, profileCustomer?.phone, profileDraft.phone]);
+
+  useEffect(() => {
+    if (isOpen) {
+      const cache = localStorage.getItem('mx_saved_accounts_cache');
+      if (cache) {
+        try {
+          const parsed = JSON.parse(cache) as { name: string; phone: string }[];
+          const deduped = Array.from(
+            new Map((parsed || []).map((acc) => [acc.phone, acc])).values()
+          );
+          setSavedAccounts(deduped);
+        } catch (e) { }
+      }
+      fetchSavedAccounts();
+    }
+  }, [isOpen, fetchSavedAccounts]);
+
+  useEffect(() => {
+    const fetchZones = async () => {
+      try {
+        const { zones, services } = await fetchDeliveryZonesAndServices();
+        setDeliveryZones(zones || []);
+        setDeliveryServices(services || []);
+      } catch (err) {
+        console.error('Failed to fetch delivery zones:', err);
+      }
+    };
+    if (isOpen) {
+      fetchZones();
+    }
+  }, [isOpen]);
+
+  useEffect(() => {
+    const sharedData = getSharedAddress();
+    if (Object.keys(sharedData).length > 0) {
+      setProfileDraft(prev => ({ ...prev, ...sharedData }));
+    }
+
+    const sharedTabs = getSharedAddressTabs();
+    if (sharedTabs.length > 0) {
+      setProfileSavedAddressTabs(sharedTabs);
+    }
+
+    return subscribeToAddressSync(
+      (data) => {
+        setProfileDraft(prev => ({ ...prev, ...data }));
+      },
+      (tabs) => {
+        setProfileSavedAddressTabs(tabs);
+      }
+    );
+  }, []);
+
+  const locationBackupRef = useRef<any>(null);
+  // Snapshot refs for discarding unsaved changes when navigating back
+  const profileDraftSnapshotRef = useRef<CustomerData | null>(null);
+  const addressTypeSnapshotRef = useRef<AddressType>('apartment');
+  const addressTabIdSnapshotRef = useRef<string>('builtin-apartment');
 
   const syncPhoneChrome = useCallback(() => {
     setPhoneChrome(isTouchPhoneChrome());
@@ -159,106 +267,21 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
     };
   }, [syncPhoneChrome]);
 
-  const clearProfileTabLongPressTimer = () => {
-    if (profileTabLongPressTimer.current) {
-      window.clearTimeout(profileTabLongPressTimer.current);
-      profileTabLongPressTimer.current = null;
-    }
-  };
-
-  const onProfileTabTouchStart = (tab: ProfileSavedAddressTab) => {
-    if (isFinePointerDesktop) return;
-    profileTabLongPressConsumed.current = false;
-    clearProfileTabLongPressTimer();
-    profileTabLongPressTimer.current = window.setTimeout(() => {
-      profileTabLongPressConsumed.current = true;
-      setMobileProfileTabSheet(tab);
-    }, 550);
-  };
-
-  const onProfileTabTouchEnd = () => {
-    clearProfileTabLongPressTimer();
-  };
-
-  useEffect(() => {
-    return () => {
-      if (profileTabLongPressTimer.current) window.clearTimeout(profileTabLongPressTimer.current);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (isFinePointerDesktop && mobileProfileTabSheet) {
-      setMobileProfileTabSheet(null);
-      setMobileProfileTabMenuPos(null);
-    }
-  }, [isFinePointerDesktop, mobileProfileTabSheet]);
-
-  const removeProfileAddressTab = (tab: ProfileSavedAddressTab) => {
-    setMobileProfileTabSheet(null);
-    setMobileProfileTabMenuPos(null);
-    setProfileSavedAddressTabs((prev) => prev.filter((t) => t.id !== tab.id));
-    setProfileAddressTabsData((prev) => {
-      const next = { ...prev };
-      delete next[tab.id];
-      return next;
-    });
-    if (activeProfileAddressTabId === tab.id) {
-      setActiveProfileAddressTabId('builtin-apartment');
-      setProfileAddressType('apartment');
-    }
-  };
-
-  const renameProfileAddressTab = (tab: ProfileSavedAddressTab, rawLabel: string) => {
-    const trimmed = rawLabel.trim();
-    if (!trimmed) return;
-    const others = profileSavedAddressTabs.filter((t) => t.id !== tab.id);
-    const newLabel = allocateUniqueProfileAddressLabel(trimmed, others);
-    if (newLabel === tab.label) {
-      setRenameProfileTabTarget(null);
-      setRenameProfileTabInput('');
-      return;
-    }
-    setProfileSavedAddressTabs((prev) =>
-      prev.map((t) => (t.id === tab.id ? { ...t, label: newLabel } : t))
-    );
-    setRenameProfileTabTarget(null);
-    setRenameProfileTabInput('');
-  };
-
-  useEffect(() => {
-    if (!mobileProfileTabSheet) {
-      setMobileProfileTabMenuPos(null);
-      return;
-    }
-    const el = document.querySelector(`[data-profile-tab-anchor="${mobileProfileTabSheet.id}"]`);
-    if (!el || !(el instanceof HTMLElement)) return;
-    const updatePos = () => {
-      const r = el.getBoundingClientRect();
-      const vw = window.innerWidth;
-      const margin = 12;
-      const width = Math.max(r.width, 112);
-      let leftPx = r.left + r.width / 2;
-      const half = width / 2;
-      leftPx = Math.max(half + margin, Math.min(leftPx, vw - half - margin));
-      setMobileProfileTabMenuPos({ top: r.bottom + 8, left: leftPx, width });
-    };
-    updatePos();
-    window.addEventListener('resize', updatePos);
-    return () => window.removeEventListener('resize', updatePos);
-  }, [mobileProfileTabSheet, profileSavedAddressTabs]);
-
-  // Sync highlighting and handle timeout
   useEffect(() => {
     if (highlightOrderId) {
       setActiveHighlightId(highlightOrderId);
       const timer = setTimeout(() => {
         setActiveHighlightId(null);
-      }, 2000); // Stop glowing after 2 seconds
+      }, 2000);
       return () => clearTimeout(timer);
     }
   }, [highlightOrderId]);
 
-  // Anchor origin to profile button for desktop open animation.
+  useEffect(() => {
+    const t = window.setInterval(() => setPickupTimerNow(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+
   useEffect(() => {
     if (!isOpen || phoneChrome) return;
     const profileButton = document.querySelector('[data-profile-button]') as HTMLElement;
@@ -275,13 +298,30 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
     if (isOpen) {
       setActiveTab(initialTab);
       setSettingsView('main');
-      fetchOrders();
     }
-  }, [isOpen, customerPhone, initialTab]);
+  }, [isOpen, initialTab]);
 
   useEffect(() => {
-    onMobileSubflowChange?.(!!(isOpen && phoneChrome && activeTab === 'settings' && settingsView !== 'main'));
-  }, [onMobileSubflowChange, isOpen, phoneChrome, activeTab, settingsView]);
+    if (isOpen) {
+      hasLoadedOrdersRef.current = false;
+      fetchOrders();
+    }
+  }, [isOpen, customerPhone]);
+
+  useEffect(() => {
+    if (profileCustomer) {
+      const time = profileCustomer.default_pickup_time;
+      setDefaultPickupTime(time || null);
+      if (time) {
+        localStorage.setItem('default_pickup_time', time);
+      } else {
+        localStorage.removeItem('default_pickup_time');
+      }
+    } else {
+      const saved = localStorage.getItem('default_pickup_time');
+      setDefaultPickupTime(saved || null);
+    }
+  }, [profileCustomer]);
 
   useEffect(() => {
     if (typeof document === 'undefined') return;
@@ -296,7 +336,47 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
     };
   }, [phoneChrome, settingsView]);
 
-  // Prevent body scroll while profile is open.
+  const updateAddressNamePopoverPosition = useCallback(() => {
+    if (!showProfileCustomAddressInput) {
+      setAddressNamePopoverPos(null);
+      return;
+    }
+    const anchor = customAddressAnchorRef.current?.querySelector('[data-address-name-trigger]') as HTMLElement | null;
+    if (!anchor) return;
+    const r = anchor.getBoundingClientRect();
+    setAddressNamePopoverPos({
+      top: Math.round(r.bottom + 10),
+      left: Math.round(r.left + r.width / 2)
+    });
+  }, [showProfileCustomAddressInput]);
+
+  useEffect(() => {
+    updateAddressNamePopoverPosition();
+    if (!showProfileCustomAddressInput) return;
+    const onScrollOrResize = () => updateAddressNamePopoverPosition();
+    window.addEventListener('scroll', onScrollOrResize, true);
+    window.addEventListener('resize', onScrollOrResize);
+    return () => {
+      window.removeEventListener('scroll', onScrollOrResize, true);
+      window.removeEventListener('resize', onScrollOrResize);
+    };
+  }, [showProfileCustomAddressInput, updateAddressNamePopoverPosition]);
+
+  useEffect(() => {
+    if (!showProfileCustomAddressInput) return;
+    const onPointerDown = (ev: PointerEvent) => {
+      const target = ev.target as HTMLElement | null;
+      if (!target) return;
+      if (target.closest('[data-address-name-trigger]')) return;
+      if (target.closest('[data-address-name-popover]')) return;
+      setShowProfileCustomAddressInput(false);
+      setPendingProfileAddressType(null);
+      setAddressNamePopoverPos(null);
+    };
+    window.addEventListener('pointerdown', onPointerDown, true);
+    return () => window.removeEventListener('pointerdown', onPointerDown, true);
+  }, [showProfileCustomAddressInput]);
+
   useEffect(() => {
     if (isOpen) {
       document.body.style.overflow = 'hidden';
@@ -308,7 +388,6 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
     };
   }, [isOpen]);
 
-  // Keep profile button anchor updated for desktop transform-origin.
   useEffect(() => {
     if (!isOpen || phoneChrome) return;
 
@@ -316,10 +395,9 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
       const profileButton = document.querySelector('[data-profile-button]') as HTMLElement;
       if (profileButton) {
         const rect = profileButton.getBoundingClientRect();
-        // For RTL (Arabic), position from right
         if (language === 'ar') {
           setMenuPosition({
-            top: rect.bottom + 8, // 8px gap below button
+            top: rect.bottom + 8,
             left: undefined,
             right: window.innerWidth - rect.right
           });
@@ -334,7 +412,6 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
     };
 
     updatePosition();
-    // Update on scroll to follow the button
     window.addEventListener('scroll', updatePosition, true);
     window.addEventListener('resize', updatePosition);
 
@@ -344,7 +421,6 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
     };
   }, [isOpen, language, phoneChrome]);
 
-  // Handle jumping to highlighted order
   useEffect(() => {
     if (isOpen && highlightOrderId && orders.length > 0) {
       setActiveTab('orders');
@@ -376,7 +452,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
           table: 'orders'
         },
         () => {
-          fetchOrders();
+          fetchOrders(undefined, false, true);
         }
       )
       .on('postgres_changes',
@@ -386,7 +462,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
           table: 'order_items'
         },
         () => {
-          fetchOrders();
+          fetchOrders(undefined, false, true);
         }
       )
       .on('postgres_changes',
@@ -396,7 +472,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
           table: 'customer_notes'
         },
         () => {
-          fetchOrders();
+          fetchOrders(undefined, false, true);
         }
       )
       .on('postgres_changes',
@@ -406,7 +482,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
           table: 'archive_orders'
         },
         () => {
-          fetchOrders();
+          fetchOrders(undefined, false, true);
         }
       )
       .subscribe();
@@ -416,32 +492,41 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
     };
   }, [isOpen, customerPhone]);
 
-  const fetchOrders = async () => {
-    setLoading(true);
-    setCustomerCoupons([]);
+  const fetchOrders = async (overridePhone?: string, skipPersistence = false, silent = false) => {
+    if (!silent && !hasLoadedOrdersRef.current) {
+      setLoading(true);
+      setCustomerCoupons([]);
+    }
 
     try {
-      // 0) حاول إيجاد المعرف في التخزين المحلي
-      let customerId: string | null = localStorage.getItem('customer_id');
+      const activePhone = filterDigits(overridePhone || customerPhone || localStorage.getItem('customer_phone') || '');
+      let customerId: string | null = overridePhone ? null : localStorage.getItem('customer_id');
 
-      // 1) حاول إيجاد العميل برقم الهاتف (fallback)
-      if (customerPhone) {
+      if (activePhone && !skipPersistence) {
+        localStorage.setItem('customer_phone', activePhone);
+      }
+
+      if (activePhone) {
         const { data: customerByPhone, error: phoneErr } = await supabase
           .from('customers')
           .select('id')
-          .eq('phone', customerPhone)
+          .eq('phone', activePhone)
           .maybeSingle();
 
         if (phoneErr) console.error("fetchOrders: error fetching by phone", phoneErr);
 
         if (customerByPhone?.id) {
-          customerId = customerByPhone.id;
+          const resolvedCustomerId = customerByPhone.id;
+          customerId = resolvedCustomerId;
+          if (!skipPersistence) {
+            localStorage.setItem('customer_id', resolvedCustomerId);
+            setProfileCustomerId(resolvedCustomerId);
+          }
+          setEditingCustomerId(resolvedCustomerId);
         }
       }
 
       if (!customerId) {
-        // 2) في حال عدم وجود سجل برقم الهاتف (عميل جديد أو رقم تغيّر)،
-        //    استخدم device_fingerprint لربط الطلبات بنفس الجهاز.
         try {
           const fingerprint = getOrCreateDeviceFingerprint();
           if (fingerprint) {
@@ -453,6 +538,10 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
 
             if (customerByDevice?.id) {
               customerId = customerByDevice.id;
+              if (!skipPersistence) {
+                setProfileCustomerId(customerId);
+              }
+              setEditingCustomerId(customerId);
             }
           }
         } catch (fpError) {
@@ -460,7 +549,6 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
         }
       }
 
-      // 3) Fetch coupons linked to the currently active phone/account only
       try {
         if (!customerId) {
           setCustomerCoupons([]);
@@ -471,12 +559,12 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
               .select('*')
               .eq('customer_id', customerId)
               .order('created_at', { ascending: false }),
-            customerPhone
+            activePhone
               ? supabase
-                  .from('device_coupons')
-                  .select('*')
-                  .eq('customer_phone', customerPhone)
-                  .order('created_at', { ascending: false })
+                .from('device_coupons')
+                .select('*')
+                .eq('customer_phone', activePhone)
+                .order('created_at', { ascending: false })
               : Promise.resolve({ data: [], error: null } as any)
           ]);
           const map = new Map<string, any>();
@@ -493,14 +581,18 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
 
       if (!customerId) {
         setOrders([]);
-        setProfileCustomerId(null);
-        setProfileCustomer(null);
-        setProfileDraft((prev) => ({ ...prev, phone: customerPhone || '' }));
+        if (!skipPersistence) {
+          setProfileCustomerId(null);
+          setProfileCustomer(null);
+        }
+        setProfileDraft((prev) => ({ ...prev, phone: activePhone || '' }));
         setLoading(false);
         return;
       }
 
-      setProfileCustomerId(customerId);
+      if (!skipPersistence) {
+        setProfileCustomerId(customerId);
+      }
       try {
         const { data: customerRow } = await supabase
           .from('customers')
@@ -509,11 +601,13 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
           .maybeSingle();
         if (customerRow) {
           const normalized = customerRow as Customer;
-          setProfileCustomer(normalized);
+          if (!skipPersistence) {
+            setProfileCustomer(normalized);
+          }
           setProfileDraft({
             name: normalized.name || '',
-            phone: normalized.phone || customerPhone || '',
-            secondary_phone: (normalized as any).secondary_phone || '',
+            phone: normalized.phone || activePhone || '',
+            secondary_phone: normalized.secondary_phone || '',
             street: normalized.street || '',
             area: normalized.area || '',
             city: normalized.city || '',
@@ -524,65 +618,72 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
             company_name: normalized.company_name || '',
             landmark: normalized.landmark || '',
             latitude: typeof normalized.latitude === 'number' ? normalized.latitude : undefined,
-            longitude: typeof normalized.longitude === 'number' ? normalized.longitude : undefined
+            longitude: typeof normalized.longitude === 'number' ? normalized.longitude : undefined,
+            default_pickup_time: normalized.default_pickup_time || ''
           });
-          const initialAddressData: ProfileAddressDraftData = {
-            street: normalized.street || '',
-            area: normalized.area || '',
-            city: normalized.city || '',
-            building_number: normalized.building_number || '',
-            floor: normalized.floor || '',
-            apartment: normalized.apartment || '',
-            house_name: normalized.house_name || '',
-            company_name: normalized.company_name || '',
-            landmark: normalized.landmark || '',
-            latitude: typeof normalized.latitude === 'number' ? normalized.latitude : undefined,
-            longitude: typeof normalized.longitude === 'number' ? normalized.longitude : undefined
-          };
-          const normalizedAddressType = (normalized as any).address_type;
+          // Sync shared address so checkout always reflects the currently active account
+          if (!skipPersistence) {
+            const syncDraft = {
+              name: normalized.name || '',
+              phone: normalized.phone || activePhone || '',
+              secondary_phone: normalized.secondary_phone || '',
+              street: normalized.street || '',
+              area: normalized.area || '',
+              city: normalized.city || '',
+              building_number: normalized.building_number || '',
+              floor: normalized.floor || '',
+              apartment: normalized.apartment || '',
+              house_name: normalized.house_name || '',
+              company_name: normalized.company_name || '',
+              landmark: normalized.landmark || '',
+              latitude: typeof normalized.latitude === 'number' ? normalized.latitude : undefined,
+              longitude: typeof normalized.longitude === 'number' ? normalized.longitude : undefined,
+            };
+            saveSharedAddress(syncDraft);
+            localStorage.setItem('customer_data', JSON.stringify(syncDraft));
+          }
+          const normalizedAddressType = normalized.address_type;
           const initialAddressType = (normalizedAddressType === 'house' || normalizedAddressType === 'workplace')
             ? normalizedAddressType
             : 'apartment';
-          setProfileAddressTabsData({
-            'builtin-apartment': initialAddressData,
-            'builtin-house': initialAddressData,
-            'builtin-workplace': initialAddressData
-          });
           setActiveProfileAddressTabId(`builtin-${initialAddressType}`);
           setProfileAddressType(initialAddressType);
-          setShowSecondaryProfilePhone(!!(normalized as any).secondary_phone);
+          setShowSecondaryProfilePhone(!!normalized.secondary_phone);
         } else {
-          setProfileCustomer(null);
-          setProfileDraft({
-            name: '',
-            phone: customerPhone || '',
-            secondary_phone: '',
-            street: '',
-            area: '',
-            city: '',
-            building_number: '',
-            floor: '',
-            apartment: '',
-            house_name: '',
-            company_name: '',
-            landmark: '',
-            latitude: undefined,
-            longitude: undefined
-          });
-          const emptyDraft: ProfileAddressDraftData = {
-            street: '', area: '', city: '', building_number: '', floor: '', apartment: '', house_name: '', company_name: '', landmark: '', latitude: undefined, longitude: undefined
-          };
-          setProfileAddressTabsData({
-            'builtin-apartment': emptyDraft,
-            'builtin-house': emptyDraft,
-            'builtin-workplace': emptyDraft
-          });
-          setProfileSavedAddressTabs([]);
+          const cid = customerId;
+          const { data: serverTabs } = await supabase
+            .from('customer_saved_addresses')
+            .select('*')
+            .eq('customer_id', cid)
+            .order('created_at', { ascending: false });
+
+          if (serverTabs) {
+            const mapped: SavedAddressTab[] = serverTabs.map((r: any) => ({
+              id: r.id,
+              label: r.label,
+              data: {
+                address_type: r.address_type,
+                address_label: r.label,
+                building_number: r.building_number || '',
+                street: r.street || '',
+                area: r.area || '',
+                city: r.city || '',
+                floor: r.floor || '',
+                apartment: r.apartment || '',
+                house_name: r.house_name || '',
+                company_name: r.company_name || '',
+                landmark: r.landmark || '',
+                latitude: r.latitude,
+                longitude: r.longitude
+              }
+            }));
+            setProfileSavedAddressTabs(mapped);
+            saveSharedAddressTabs(mapped);
+          }
         }
       } catch (e) {
         console.error('Could not load customer profile row:', e);
       }
-      // Load security flags (password/recovery exist)
       try {
         setSecurityLoading(true);
         const { data: secRow } = await supabase
@@ -597,7 +698,6 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
         setSecurityLoading(false);
       }
 
-      // Fetch active orders
       const { data: ordersData, error: ordersErr } = await supabase
         .from('orders')
         .select('*')
@@ -606,7 +706,6 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
 
       if (ordersErr) console.error("fetchOrders: error fetching active orders", ordersErr);
 
-      // Fetch archived orders
       const { data: archivedOrdersData, error: archErr } = await supabase
         .from('archive_orders')
         .select('*')
@@ -617,7 +716,6 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
 
       const allOrders: OrderWithDetails[] = [];
 
-      // Process active orders
       if (ordersData) {
         const ordersWithDetails = await Promise.all(
           ordersData.map(async (order) => {
@@ -642,7 +740,6 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
         allOrders.push(...ordersWithDetails);
       }
 
-      // Process archived orders
       if (archivedOrdersData) {
         const archivedWithDetails = await Promise.all(
           archivedOrdersData.map(async (order) => {
@@ -695,7 +792,6 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
         allOrders.push(...archivedWithDetails);
       }
 
-      // Sort all orders by created_at (most recent first)
       allOrders.sort((a, b) => {
         const dateA = new Date(a.created_at).getTime();
         const dateB = new Date(b.created_at).getTime();
@@ -703,6 +799,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
       });
 
       setOrders(allOrders);
+      hasLoadedOrdersRef.current = true;
 
     } catch (err) {
       console.error("fetchOrders: unexpected unhandled error", err);
@@ -711,50 +808,41 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
     }
   };
 
-  const handleCancelOrder = async (orderId: string) => {
-    if (!cancelReason.trim()) {
-      alert(language === 'ar' ? 'الرجاء إدخال سبب الإلغاء' : 'Please enter cancellation reason');
+  const saveProfileData = async (isSilent = false, overrides?: Record<string, any>) => {
+    const name = profileDraft.name?.trim();
+    const phone = profileDraft.phone?.trim();
+    const secondaryPhone = profileDraft.secondary_phone?.trim();
+    const targetId = editingCustomerId || profileCustomerId;
+
+    if (!phone) {
+      setProfilePhoneError(language === 'ar' ? 'رقم الهاتف مطلوب' : 'Phone is required');
       return;
     }
-
-    const order = orders.find(o => o.id === orderId);
-    if (!order) return;
-
-    if (order.status === 'on_way' || order.status === 'arrived') {
-      const confirm = window.confirm(
-        'تنبيه: إلغاء الطلب الآن سيسبب خسائر على الشركة. هل أنت متأكد من الإلغاء؟'
-      );
-      if (!confirm) {
-        return;
-      }
+    if (phone.length < 10) {
+      setProfilePhoneError(language === 'ar' ? 'يجب أن يكون الرقم 10 أرقام على الأقل' : 'Phone must be at least 10 digits');
+      return;
     }
-
-    await supabase
-      .from('orders')
-      .update({
-        status: 'cancellation_pending',
-        cancellation_reason: cancelReason,
-        cancelled_by: 'customer',
-        cancellation_stage: order.status
-      })
-      .eq('id', orderId);
-
-    setCancelOrderId(null);
-    setCancelReason('');
-    fetchOrders();
-  };
-
-  const saveProfileData = async () => {
-    const phone = profileDraft.phone.trim();
-    const name = profileDraft.name.trim();
-    if (!phone || !name) return;
+    if (phone.length > 15) {
+      setProfilePhoneError(language === 'ar' ? 'رقم الهاتف يجب ألا يتجاوز 15 رقم' : 'Phone number must not exceed 15 digits');
+      return;
+    }
+    if (secondaryPhone && secondaryPhone.length > 15) {
+      setProfilePhoneError(language === 'ar' ? 'رقم الهاتف يجب ألا يتجاوز 15 رقم' : 'Phone number must not exceed 15 digits');
+      return;
+    }
+    if (secondaryPhone && secondaryPhone.length < 10) {
+      setProfilePhoneError(language === 'ar' ? 'يجب أن يكون الرقم 10 أرقام على الأقل' : 'Phone must be at least 10 digits');
+      return;
+    }
+    setProfilePhoneError(null);
 
     setProfileSaving(true);
     try {
+      const fp = getOrCreateDeviceFingerprint();
       const payload: any = {
         name,
         phone,
-        secondary_phone: profileDraft.secondary_phone || null,
+        secondary_phone: secondaryPhone || null,
         street: profileDraft.street || '',
         area: profileDraft.area || '',
         city: profileDraft.city || '',
@@ -766,18 +854,30 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
         landmark: profileDraft.landmark || null,
         latitude: typeof profileDraft.latitude === 'number' ? profileDraft.latitude : null,
         longitude: typeof profileDraft.longitude === 'number' ? profileDraft.longitude : null,
+        default_pickup_time: overrides?.hasOwnProperty('default_pickup_time') ? overrides.default_pickup_time : (profileDraft.default_pickup_time || null),
+        device_fingerprint: fp,
         updated_at: new Date().toISOString()
       };
 
-      if (profileCustomerId) {
+      // Apply any additional overrides to the payload
+      if (overrides) {
+        Object.assign(payload, overrides);
+      }
+
+      const isEditingActive = targetId === profileCustomerId;
+
+      if (targetId) {
         const { data, error } = await supabase
           .from('customers')
           .update(payload)
-          .eq('id', profileCustomerId)
+          .eq('id', targetId)
           .select('*')
           .single();
         if (error) throw error;
-        if (data) setProfileCustomer(data as Customer);
+
+        if (isEditingActive && !viewingAccountPhone) {
+          if (data) setProfileCustomer(data as Customer);
+        }
       } else {
         const { data, error } = await supabase
           .from('customers')
@@ -785,26 +885,38 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
           .select('*')
           .single();
         if (error) throw error;
-        if (data?.id) {
-          setProfileCustomerId(data.id);
-          localStorage.setItem('customer_id', data.id);
+
+        if (!viewingAccountPhone) {
+          if (data?.id) {
+            setProfileCustomerId(data.id);
+            localStorage.setItem('customer_id', data.id);
+          }
+          if (data) setProfileCustomer(data as Customer);
         }
-        if (data) setProfileCustomer(data as Customer);
       }
 
-      localStorage.setItem('customer_phone', phone);
-      localStorage.setItem('customer_data', JSON.stringify({
-        ...profileDraft,
-        phone,
-        name
-      }));
-      setSettingsView('account');
-      
-      const { data: updatedCustomer } = await supabase.from('customers').select('*').eq('phone', phone).single();
-      if (updatedCustomer) {
-        setProfileCustomer(updatedCustomer as Customer);
+      if (!viewingAccountPhone) {
+        localStorage.setItem('customer_phone', phone);
+        localStorage.setItem('customer_data', JSON.stringify({
+          ...profileDraft,
+          phone,
+          secondary_phone: secondaryPhone,
+          name
+        }));
+        saveSharedAddress({ ...profileDraft, phone, name });
       }
-      await fetchOrders();
+
+      // Clear snapshot on successful save so snapshot doesn't linger
+      profileDraftSnapshotRef.current = null;
+      if (!isSilent) {
+        setSettingsView('account');
+      }
+
+      if (!viewingAccountPhone) {
+        await fetchOrders();
+      } else {
+        await fetchSavedAccounts();
+      }
     } catch (e) {
       console.error('Failed to save profile data:', e);
     } finally {
@@ -812,10 +924,104 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
     }
   };
 
+  const getStatusInfo = (status: string, deliveryMethod?: string) => {
+    if (deliveryMethod === 'pickup') {
+      switch (status) {
+        case 'under_review':
+          return { icon: Clock, text: 'قيد المعاينة', color: 'text-yellow-400', bg: 'bg-yellow-500/10', border: 'border-yellow-500/30' };
+        case 'preparing':
+          return { icon: Package, text: 'قيد التحضير', color: 'text-blue-400', bg: 'bg-blue-500/10', border: 'border-blue-500/30' };
+        case 'arrived':
+          return { icon: Package, text: 'تم التحضير', color: 'text-orange-400', bg: 'bg-orange-500/10', border: 'border-orange-500/30' };
+        case 'completed':
+          return { icon: CheckCircle, text: 'تم التسليم', color: 'text-green-400', bg: 'bg-green-500/10', border: 'border-green-500/30' };
+      }
+    }
+
+    switch (status) {
+      case 'under_review':
+        return { icon: Clock, text: language === 'ar' ? 'قيد المعاينة' : 'Under Review', color: 'text-yellow-400', bg: 'bg-yellow-500/10', border: 'border-yellow-500/30' };
+      case 'preparing':
+        return { icon: Package, text: language === 'ar' ? 'قيد التحضير' : 'Preparing', color: 'text-blue-400', bg: 'bg-blue-500/10', border: 'border-blue-500/30' };
+      case 'on_way':
+        return { icon: Truck, text: language === 'ar' ? 'في الطريق' : 'On the Way', color: 'text-purple-400', bg: 'bg-purple-500/10', border: 'border-purple-500/30' };
+      case 'arrived':
+        return { icon: AlertTriangle, text: language === 'ar' ? 'وصل الآن' : 'Arrived', color: 'text-orange-400', bg: 'bg-orange-500/10', border: 'border-orange-500/30' };
+      case 'completed':
+        return { icon: CheckCircle, text: language === 'ar' ? 'مكتمل' : 'Completed', color: 'text-green-400', bg: 'bg-green-500/10', border: 'border-green-500/30' };
+      case 'cancelled':
+        return { icon: XCircle, text: language === 'ar' ? 'ملغي' : 'Cancelled', color: 'text-red-400', bg: 'bg-red-500/10', border: 'border-red-500/30' };
+      case 'cancellation_pending':
+        return { icon: Clock, text: language === 'ar' ? 'طلب إلغاء' : 'Cancel Request', color: 'text-yellow-400', bg: 'bg-yellow-500/10', border: 'border-yellow-500/30' };
+      default:
+        return { icon: Package, text: status, color: 'text-gray-400', bg: 'bg-gray-500/10', border: 'border-gray-500/30' };
+    }
+  };
+
+  const canCancel = (status: string) => {
+    return ['under_review', 'preparing'].includes(status);
+  };
+
+  const getPickupTimerMeta = (order: OrderWithDetails): { text: string; className: string; expired: boolean; deadlineRaw?: string | null } | null => {
+    if (order.delivery_method !== 'pickup') return null;
+    if (!['under_review', 'preparing', 'arrived', 'cancellation_pending'].includes(order.status)) return null;
+    const deadlineRaw = (order as any).pickup_deadline_at as string | null | undefined;
+    if (!deadlineRaw) return null;
+    const deadlineMs = new Date(deadlineRaw).getTime();
+    if (Number.isNaN(deadlineMs)) return null;
+    const diff = deadlineMs - pickupTimerNow;
+    if (diff <= 0) {
+      return {
+        text: '00:00',
+        className: 'text-red-500 font-black animate-pulse',
+        expired: true,
+        deadlineRaw
+      } as any;
+    }
+    const totalSeconds = Math.floor(diff / 1000);
+    const hh = Math.floor(totalSeconds / 3600).toString().padStart(2, '0');
+    const mm = Math.floor((totalSeconds % 3600) / 60).toString().padStart(2, '0');
+    // Removed seconds
+    const overHour = diff > 60 * 60 * 1000;
+    const under15 = diff < 15 * 60 * 1000;
+    return {
+      text: `${hh}:${mm}`,
+      className: under15 ? 'text-red-400 animate-pulse' : overHour ? 'text-green-400' : 'text-orange-300',
+      expired: false,
+      deadlineRaw
+    };
+  };
+
+  const handleCancelOrder = async (orderId: string) => {
+    const reason = cancelReason.trim();
+    if (!reason) {
+      setSecErr(language === 'ar' ? 'الرجاء كتابة سبب الإلغاء' : 'Please provide a cancellation reason');
+      return;
+    }
+
+    try {
+      const { error } = await supabase
+        .from('orders')
+        .update({
+          status: 'cancellation_pending',
+          cancellation_reason: reason,
+          updated_at: new Date().toISOString()
+        } as any)
+        .eq('id', orderId);
+
+      if (error) throw error;
+      setCancelOrderId(null);
+      setCancelReason('');
+      await fetchOrders();
+    } catch (err) {
+      console.error('Error requesting cancellation:', err);
+    }
+  };
+
   const displayName = (profileCustomer?.name || '').trim();
-  const profileInitial = displayName ? displayName.charAt(0).toUpperCase() : '?';
-  const hasOrderInfo = !!(displayName || (profileCustomer?.phone || '').trim());
-  const hasAddressSummary = !!((profileCustomer?.street || '').trim() || (profileCustomer?.area || '').trim() || (profileCustomer?.city || '').trim() || (typeof profileCustomer?.latitude === 'number' && typeof profileCustomer?.longitude === 'number'));
+  const displayPhone = (profileCustomer?.phone || '').trim();
+  const profileInitial = displayName ? displayName.charAt(0).toUpperCase() : (displayPhone ? '#' : '?');
+  const hasAddressSummary = !!((profileCustomer?.street || '').trim() || (profileCustomer?.area || '').trim() || (profileCustomer?.city || '').trim());
   const mapLat = typeof profileDraft.latitude === 'number' ? profileDraft.latitude : profileCustomer?.latitude;
   const mapLng = typeof profileDraft.longitude === 'number' ? profileDraft.longitude : profileCustomer?.longitude;
   const profileAddressTypeLabel = profileAddressType === 'house'
@@ -824,145 +1030,140 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
       ? (language === 'ar' ? 'مكان عمل' : 'Workplace')
       : (language === 'ar' ? 'شقة' : 'Apartment');
 
-  const pullAddressDraftFromProfile = useCallback((): ProfileAddressDraftData => ({
-    street: profileDraft.street || '',
-    area: profileDraft.area || '',
-    city: profileDraft.city || '',
-    building_number: profileDraft.building_number || '',
-    floor: profileDraft.floor || '',
-    apartment: profileDraft.apartment || '',
-    house_name: profileDraft.house_name || '',
-    company_name: profileDraft.company_name || '',
-    landmark: profileDraft.landmark || '',
-    latitude: profileDraft.latitude,
-    longitude: profileDraft.longitude
-  }), [profileDraft]);
-
-  const applyAddressDraftToProfile = useCallback((data: Partial<ProfileAddressDraftData>) => {
-    setProfileDraft((prev) => ({
-      ...prev,
-      street: data.street ?? prev.street,
-      area: data.area ?? prev.area,
-      city: data.city ?? prev.city,
-      building_number: data.building_number ?? prev.building_number,
-      floor: data.floor ?? prev.floor,
-      apartment: data.apartment ?? prev.apartment,
-      house_name: data.house_name ?? prev.house_name,
-      company_name: data.company_name ?? prev.company_name,
-      landmark: data.landmark ?? prev.landmark,
-      latitude: data.latitude ?? prev.latitude,
-      longitude: data.longitude ?? prev.longitude
-    }));
-  }, []);
-
-  const addProfileCustomAddressTab = () => {
+  const addProfileCustomAddressTab = async () => {
     const raw = newProfileAddressName.trim();
     if (!raw) return;
-    const label = allocateUniqueProfileAddressLabel(raw, profileSavedAddressTabs);
-    const tabId = `profile-tab-${Date.now()}`;
-    const currentData = pullAddressDraftFromProfile();
-    setProfileSavedAddressTabs((prev) => [...prev, { id: tabId, label, type: profileAddressType, data: currentData }]);
-    setProfileAddressTabsData((prev) => ({ ...prev, [tabId]: currentData }));
+    const targetType = pendingProfileAddressType || (profileAddressType as 'apartment' | 'house' | 'workplace');
+
+    const label = allocateUniqueSavedAddressLabel(raw, profileSavedAddressTabs);
+    const tabId = `${Date.now()}`;
+    const currentData: CustomerData = {
+      ...profileDraft,
+      address_type: targetType,
+      address_label: label
+    };
+
+    const newTab: SavedAddressTab = { id: tabId, label, data: currentData };
+
+    setProfileSavedAddressTabs((prev) => {
+      const updated = [...prev, newTab];
+      saveSharedAddressTabs(updated);
+      return updated;
+    });
+
     setActiveProfileAddressTabId(tabId);
     setShowProfileCustomAddressInput(false);
+    setPendingProfileAddressType(null);
+    setAddressNamePopoverPos(null);
     setNewProfileAddressName('');
-  };
 
-  const switchAddressTab = useCallback((nextTabId: string, nextType: 'apartment' | 'house' | 'workplace') => {
-    const currentData = pullAddressDraftFromProfile();
-    setProfileAddressTabsData((prev) => {
-      const merged = { ...prev, [activeProfileAddressTabId]: currentData };
-      const customTabData = profileSavedAddressTabs.find((t) => t.id === nextTabId)?.data;
-      const target = merged[nextTabId] || customTabData;
-      if (target) applyAddressDraftToProfile(target);
-      setProfileAddressType(nextType);
-      setActiveProfileAddressTabId(nextTabId);
-      return merged;
-    });
-  }, [activeProfileAddressTabId, applyAddressDraftToProfile, pullAddressDraftFromProfile, profileSavedAddressTabs]);
+    let cid = profileCustomerId;
+    if (!cid && profileDraft.phone) {
+      const foundId = await findCustomerIdByPhone(profileDraft.phone);
+      if (foundId) {
+        cid = foundId;
+        setProfileCustomerId(cid);
+      }
+    }
 
-  const getStatusInfo = (status: string) => {
-    switch (status) {
-      case 'under_review':
-        return { icon: Clock, text: language === 'ar' ? 'قيد المعاينة' : 'Under Review', color: 'text-yellow-400', glow: 'shadow-[0_0_10px_rgba(250,204,21,0.4)]' };
-      case 'preparing':
-        return { icon: Package, text: language === 'ar' ? 'قيد التحضير' : 'Preparing', color: 'text-blue-400', glow: 'shadow-[0_0_10px_rgba(96,165,250,0.4)]' };
-      case 'on_way':
-        return { icon: Truck, text: language === 'ar' ? 'في الطريق' : 'On the Way', color: 'text-purple-400', glow: 'shadow-[0_0_10px_rgba(168,85,247,0.4)]' };
-      case 'arrived':
-        return { icon: AlertTriangle, text: language === 'ar' ? 'وصل الآن' : 'Arrived', color: 'text-orange-400', glow: 'shadow-[0_0_10px_rgba(251,146,60,0.4)]' };
-      case 'completed':
-        return { icon: CheckCircle, text: language === 'ar' ? 'تم التسليم والدفع' : 'Completed', color: 'text-green-400', glow: '' };
-      case 'cancelled':
-        return { icon: XCircle, text: language === 'ar' ? 'ملغي' : 'Cancelled', color: 'text-red-400', glow: '' };
-      case 'cancellation_pending':
-        return { icon: Clock, text: language === 'ar' ? 'إلغاء قيد المعاينة' : 'Cancellation Pending', color: 'text-yellow-400', glow: 'shadow-[0_0_10px_rgba(250,204,21,0.4)]' };
-      default:
-        return { icon: Package, text: status, color: 'text-gray-400', glow: '' };
+    if (cid) {
+      await supabase.from('customer_saved_addresses').upsert({
+        customer_id: cid,
+        label,
+        address_type: targetType,
+        building_number: profileDraft.building_number || null,
+        street: profileDraft.street || null,
+        area: profileDraft.area || null,
+        city: profileDraft.city || null,
+        floor: profileDraft.floor || null,
+        apartment: profileDraft.apartment || null,
+        house_name: profileDraft.house_name || null,
+        company_name: profileDraft.company_name || null,
+        landmark: profileDraft.landmark || null
+      }, { onConflict: 'customer_id,label' });
     }
   };
 
-  const canCancel = (status: string) => {
-    return status === 'under_review' || status === 'preparing' || status === 'on_way' || status === 'arrived';
+  const switchAddressTab = useCallback((nextTabId: string, nextType: 'apartment' | 'house' | 'workplace') => {
+    setActiveProfileAddressTabId(nextTabId);
+    setProfileAddressType(nextType);
+
+    if (nextTabId.startsWith('builtin-')) {
+      // Shared draft handles built-ins automatically by current behavior
+    } else {
+      const tab = profileSavedAddressTabs.find(t => t.id === nextTabId);
+      if (tab) {
+        setProfileDraft(prev => {
+          const updated = { ...prev, ...tab.data };
+          saveSharedAddress(updated);
+          return updated;
+        });
+      }
+    }
+  }, [profileSavedAddressTabs]);
+
+  const removeProfileSavedAddressTab = async (tab: SavedAddressTab) => {
+    setProfileSavedAddressTabs((prev) => {
+      const updated = prev.filter((t) => t.id !== tab.id);
+      saveSharedAddressTabs(updated);
+      return updated;
+    });
+    if (profileDraft.address_label === tab.label) {
+      setActiveProfileAddressTabId('builtin-apartment');
+      setProfileAddressType('apartment');
+      setProfileDraft((prev) => {
+        const updated = { ...prev, address_type: 'apartment', address_label: '' } as CustomerData;
+        saveSharedAddress(updated);
+        return updated;
+      });
+    }
+    if (profileCustomerId) {
+      await supabase.from('customer_saved_addresses').delete().eq('customer_id', profileCustomerId).eq('label', tab.label);
+    }
   };
 
   if (!isOpen) return null;
 
   return (
     <div
-      className={`fixed inset-0 z-[60] flex justify-center ${
-        phoneChrome
+      className={`fixed inset-0 flex justify-center ${activeTab === 'settings' && settingsView !== 'main' ? 'z-[150]' : 'z-[115]'
+        } ${phoneChrome
           ? 'items-stretch'
           : 'items-center'
-      }`}
+        }`}
       onClick={onClose}
     >
       <div
-        className={`pointer-events-auto flex flex-col overflow-hidden shadow-2xl ${
-          phoneChrome
-            ? 'profile-dropdown-phone h-full w-full max-w-none flex-1 rounded-none'
-            : `profile-dropdown-desktop relative h-auto max-h-[min(88vh,860px)] w-full ${
-                activeTab === 'orders' ? 'max-w-5xl' : 'max-w-2xl'
-              } rounded-[1.85rem] border-2 border-primary/45`
-        }`}
+        className={`pointer-events-auto flex flex-col overflow-hidden shadow-2xl ${phoneChrome
+          ? 'profile-dropdown-phone h-full w-full max-w-none flex-1 rounded-none'
+          : `profile-dropdown-desktop relative h-auto max-h-[min(88vh,860px)] w-full ${activeTab === 'orders' ? 'max-w-5xl' : 'max-w-2xl'
+          } rounded-[1.85rem] border-2 border-primary/45`
+          }`}
         onClick={(e) => e.stopPropagation()}
         style={!phoneChrome ? { transformOrigin: `${menuPosition.left ?? window.innerWidth / 2}px ${menuPosition.top}px` } : undefined}
       >
         <div
-          className={`flex min-h-0 flex-1 flex-col overflow-hidden bg-dark ${
-            phoneChrome ? 'rounded-none border-0' : 'rounded-[1.85rem] border-2 border-primary'
-          }`}
+          className={`flex min-h-0 flex-1 flex-col overflow-hidden bg-dark ${phoneChrome ? 'rounded-none border-0' : 'rounded-[1.85rem] border-2 border-primary'
+            }`}
         >
-          {/* Header */}
-          <div className="flex shrink-0 items-center justify-between border-b-2 border-primary bg-primary/30 p-4">
-            {!phoneChrome ? (
-              <button
-                onClick={onClose}
-                className="bg-gray-600 hover:bg-gray-500 p-2 rounded-lg transition-colors"
-              >
-                <X className="w-5 h-5 text-white" />
-              </button>
-            ) : (
-              <div className="w-10" />
-            )}
-            <h2 className="text-xl font-black text-white">
+          <div className="flex h-12 items-center justify-between border-b border-white/5 bg-dark px-4 backdrop-blur-md">
+            <div className="w-8" />
+            <h2 className="text-base font-black text-white">
               {activeTab === 'orders'
                 ? (language === 'ar' ? 'طلباتي' : 'My Orders')
                 : (language === 'ar' ? 'الملف الشخصي' : 'Profile')}
             </h2>
-            <div className="w-10" />
+            <div className="w-8" />
           </div>
 
           <div
-            className={`custom-scrollbar flex-1 overflow-y-auto p-4 ${
-              phoneChrome ? 'min-h-0 max-h-none' : 'max-h-[calc(85vh-80px)]'
-            }`}
+            className={`custom-scrollbar flex-1 overflow-y-auto p-4 ${phoneChrome ? 'min-h-0 max-h-none' : 'max-h-[calc(85vh-80px)]'
+              }`}
           >
             {!phoneChrome && (
               <div
-                className={`mb-6 grid h-11 gap-2 rounded-xl border border-primary/40 bg-dark/60 p-1 ${
-                  activeTab === 'orders' ? 'grid-cols-[1.35fr_1fr]' : 'grid-cols-[1fr_1.35fr]'
-                }`}
+                className={`mb-6 grid h-11 gap-2 rounded-xl border border-primary/40 bg-dark/60 p-1 ${activeTab === 'orders' ? 'grid-cols-[1.35fr_1fr]' : 'grid-cols-[1fr_1.35fr]'
+                  }`}
               >
                 <button
                   type="button"
@@ -990,109 +1191,422 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
               </div>
             )}
 
-            {/* Settings Tab */}
             {activeTab === 'settings' && (
-              <div className="bg-dark/50 border-2 border-primary/30 rounded-xl p-6 mb-6">
-                <div className="relative mb-5 rounded-2xl border border-primary/35 bg-surface/40 p-4">
+              <div className="space-y-6">
+                <div className="relative mb-2">
                   {settingsView === 'main' && (
-                    <div className="space-y-3">
-                      <button
-                        type="button"
-                        onClick={() => setSettingsView('account')}
-                        className="w-full rounded-2xl border border-primary/40 bg-primary/10 p-4 text-right transition-colors hover:bg-primary/15"
-                      >
-                        {displayName ? (
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-3">
-                              <div className="flex h-11 w-11 items-center justify-center rounded-full bg-primary/25 text-lg font-black text-white">
+                    <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                      {/* Header Block */}
+                      {profileCustomer ? (
+                        <div className="flex items-center justify-between gap-4 py-2 border-b border-white/5 pb-6">
+                          <button
+                            type="button"
+                            onClick={() => setSettingsView('account')}
+                            className="flex items-center gap-3 flex-1 text-right group"
+                          >
+                            <div className="relative">
+                              <div className="flex h-14 w-14 items-center justify-center rounded-full bg-primary/20 text-xl font-black text-white border-2 border-primary/30 group-hover:bg-primary/30 transition-all">
                                 {profileInitial}
                               </div>
-                              <div>
-                                <p className="text-white text-base font-black">{displayName}</p>
-                                <p className="text-xs text-muted">{profileCustomer?.phone}</p>
+                              <div className="absolute -bottom-0.5 -right-0.5 w-5 h-5 bg-primary rounded-full flex items-center justify-center border-2 border-surface shadow-lg">
+                                <Pencil className="w-2.5 h-2.5 text-white" />
                               </div>
                             </div>
-                            <span className="rounded-lg border border-primary/40 bg-primary/20 px-3 py-1.5 text-xs font-black text-primary">
-                              {language === 'ar' ? 'تعديل' : 'Edit'}
-                            </span>
-                          </div>
-                        ) : (
-                          <span className="flex items-center justify-between text-sm font-black text-white">
-                            <Plus className="h-4 w-4 text-primary" />
-                            <span>{language === 'ar' ? 'إضافة حساب' : 'Add account'}</span>
-                          </span>
-                        )}
-                      </button>
+                            <div className="flex-1">
+                              <p className="text-white text-lg font-black leading-tight">
+                                {displayName || (language === 'ar' ? 'حساب نشط' : 'Active Account')}
+                              </p>
+                              <p className="text-sm text-muted mt-0.5" dir="ltr">
+                                {displayPhone}
+                              </p>
+                            </div>
+                          </button>
 
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setSettingsView(savedAccounts.length >= 2 ? 'switch_accounts' : 'add_account')}
+                              className="w-10 h-10 flex items-center justify-center rounded-full bg-primary/10 border border-primary/30 text-primary hover:bg-primary/20 transition-all relative"
+                              title={language === 'ar' ? 'إضافة حساب' : 'Add account'}
+                            >
+                              <Plus className="w-5 h-5" />
+                              {savedAccounts.length > 1 && (
+                                <span className="absolute -top-1 -right-1 bg-primary text-white text-[10px] font-black w-5 h-5 rounded-full flex items-center justify-center border-2 border-surface shadow-sm">
+                                  {savedAccounts.length - 1}
+                                </span>
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setSettingsView(savedAccounts.length > 0 ? 'switch_accounts' : 'add_account')}
+                          className="w-full rounded-2xl border-2 border-dashed border-primary/30 bg-primary/5 p-6 flex flex-col items-center gap-2 transition-all hover:bg-primary/10 relative overflow-hidden"
+                        >
+                          <div className="relative w-12 h-12 rounded-full bg-primary/20 flex items-center justify-center">
+                            <Plus className="w-6 h-6 text-primary" />
+                            {savedAccounts.length > 0 && (
+                              <div className="absolute -top-1 -right-1 bg-primary text-white text-[10px] font-black w-5 h-5 rounded-full flex items-center justify-center border-2 border-surface shadow-lg">
+                                {savedAccounts.length}
+                              </div>
+                            )}
+                          </div>
+                          <span className="text-sm font-black text-white">
+                            {savedAccounts.length > 0
+                              ? (language === 'ar' ? 'عرض الحسابات' : 'View Accounts')
+                              : (language === 'ar' ? 'إضافة حساب' : 'Add account')}
+                          </span>
+                        </button>
+                      )}
+
+                      {/* Settings List */}
+                      <div className="pt-2">
+                        <div className="flex items-center justify-between mb-4">
+                          <h3 className="text-lg font-black text-white text-right">
+                            {language === 'ar' ? 'الأعدادات' : 'Settings'}
+                          </h3>
+                        </div>
+
+                        <div className="space-y-1">
+                          {profileCustomerId && (
+                            <button
+                              onClick={() => setSettingsView('security')}
+                              className="w-full flex items-center justify-between p-3 hover:bg-white/5 transition-all rounded-xl group"
+                            >
+                              <div className="flex items-center gap-4">
+                                <div className="w-10 h-10 flex items-center justify-center rounded-lg bg-amber-500/10 text-amber-500">
+                                  <Lock className="w-5 h-5" />
+                                </div>
+                                <div className="text-right">
+                                  <p className="text-white font-black text-sm">{language === 'ar' ? 'أمان الحساب' : 'Account Security'}</p>
+                                  <p className="text-[10px] text-muted">{language === 'ar' ? 'كلمة المرور، كود الاسترجاع' : 'Password, recovery code'}</p>
+                                </div>
+                              </div>
+                              <ChevronLeft className={`w-4 h-4 text-muted group-hover:text-white transition-colors ${language === 'ar' ? '' : 'rotate-180'}`} />
+                            </button>
+                          )}
+
+                          <button
+                            onClick={() => setLanguage(language === 'ar' ? 'en' : 'ar')}
+                            className="w-full flex items-center justify-between p-3 hover:bg-white/5 transition-all rounded-xl group"
+                          >
+                            <div className="flex items-center gap-4">
+                              <div className="w-10 h-10 flex items-center justify-center rounded-lg bg-blue-500/10 text-blue-500">
+                                <Globe className="w-5 h-5" />
+                              </div>
+                              <div className="text-right">
+                                <p className="text-white font-black text-sm">{language === 'ar' ? 'اللغة' : 'Language'}</p>
+                                <p className="text-[10px] text-muted">{language === 'ar' ? 'العربية' : 'English'}</p>
+                              </div>
+                            </div>
+                            <ChevronLeft className={`w-4 h-4 text-muted group-hover:text-white transition-colors ${language === 'ar' ? '' : 'rotate-180'}`} />
+                          </button>
+
+                          <button
+                            onClick={toggleTheme}
+                            className="w-full flex items-center justify-between p-3 hover:bg-white/5 transition-all rounded-xl group"
+                          >
+                            <div className="flex items-center gap-4">
+                              <div className="w-10 h-10 flex items-center justify-center rounded-lg bg-primary/10 text-primary">
+                                {theme === 'dark' ? <Moon className="w-5 h-5" /> : <Sun className="w-5 h-5" />}
+                              </div>
+                              <div className="text-right">
+                                <p className="text-white font-black text-sm">{language === 'ar' ? 'الوضع' : 'Theme'}</p>
+                                <p className="text-[10px] text-muted">{theme === 'dark' ? (language === 'ar' ? 'مظلم' : 'Dark') : (language === 'ar' ? 'فاتح' : 'Light')}</p>
+                              </div>
+                            </div>
+                            <ChevronLeft className={`w-4 h-4 text-muted group-hover:text-white transition-colors ${language === 'ar' ? '' : 'rotate-180'}`} />
+                          </button>
+
+                          <button
+                            onClick={() => setSettingsView('coupons')}
+                            className="w-full flex items-center justify-between p-3 hover:bg-white/5 transition-all rounded-xl group"
+                          >
+                            <div className="flex items-center gap-4">
+                              <div className="w-10 h-10 flex items-center justify-center rounded-lg bg-green-500/10 text-green-500 relative">
+                                <TicketPercent className="w-5 h-5" />
+                                {customerCoupons.length > 0 && (
+                                  <span className="absolute -top-1 -right-1 bg-primary text-white text-[8px] font-black w-4 h-4 rounded-full flex items-center justify-center border border-surface">
+                                    {customerCoupons.length}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-right">
+                                <p className="text-white font-black text-sm">{language === 'ar' ? 'الكوبونات' : 'Coupons'}</p>
+                                <p className="text-[10px] text-muted">{language === 'ar' ? 'عرض الكوبونات المتاحة' : 'View available coupons'}</p>
+                              </div>
+                            </div>
+                            <ChevronLeft className={`w-4 h-4 text-muted group-hover:text-white transition-colors ${language === 'ar' ? '' : 'rotate-180'}`} />
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   )}
 
-                  {settingsView === 'account' && (
-                    <div className={`space-y-3 ${phoneChrome ? 'profile-mobile-push' : ''}`}>
+                  {settingsView === 'switch_accounts' && (
+                    <div
+                      className={`space-y-3 ${phoneChrome ? 'profile-mobile-push' : ''}`}
+                      onClick={() => { if (accountMenuOpen) setAccountMenuOpen(null); }}
+                    >
                       <button
                         type="button"
-                        onClick={() => setSettingsView('main')}
+                        onClick={() => { setSettingsView('main'); setAccountMenuOpen(null); }}
                         className="inline-flex items-center gap-1 rounded-lg border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-black text-white"
                       >
                         <ChevronRight className="h-3.5 w-3.5" />
                         {language === 'ar' ? 'رجوع' : 'Back'}
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => setSettingsView('data')}
-                        className="w-full rounded-xl border border-primary/35 bg-dark/70 p-4 text-right"
-                      >
-                        <div className="mb-2 flex items-center justify-between">
-                          <h4 className="text-sm font-black text-white">{language === 'ar' ? 'معلومات الطلب' : 'Order Information'}</h4>
-                          {!hasOrderInfo && <Plus className="h-4 w-4 text-primary" />}
-                        </div>
-                        {hasOrderInfo ? (
-                          <div className="space-y-1 text-xs text-muted">
-                            <p>{displayName || '—'}</p>
-                            <p dir="ltr">{profileCustomer?.phone || '—'}</p>
-                          </div>
-                        ) : (
-                          <p className="text-xs text-muted">{language === 'ar' ? 'اضغط لإضافة البيانات' : 'Tap to add data'}</p>
-                        )}
-                      </button>
 
-                      <button
-                        type="button"
-                        onClick={() => setSettingsView('addresses')}
-                        className="w-full rounded-xl border border-primary/35 bg-dark/70 p-4 text-right"
-                      >
-                        <div className="mb-2 flex items-center justify-between">
-                          <h4 className="text-sm font-black text-white">{language === 'ar' ? 'العناوين' : 'Addresses'}</h4>
-                          {!hasAddressSummary && <Plus className="h-4 w-4 text-primary" />}
-                        </div>
-                        {hasAddressSummary && typeof mapLat === 'number' && typeof mapLng === 'number' ? (
-                          <div className="space-y-2">
-                            <div className="overflow-hidden rounded-lg border border-primary/30">
-                              <InteractiveMap
-                                latitude={mapLat}
-                                longitude={mapLng}
-                                onLocationChange={() => {}}
-                                isEditing={false}
-                                className="!h-28"
-                              />
+                      <div className="space-y-3 mt-4">
+                        {savedAccounts.map((acc) => {
+                          const initial = acc.name ? acc.name.charAt(0).toUpperCase() : '#';
+                          const isActive = acc.phone === profileCustomer?.phone;
+                          const menuOpen = accountMenuOpen === acc.phone;
+                          return (
+                            <div key={acc.phone} className="relative" onClick={(e) => e.stopPropagation()}>
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  if (menuOpen) { setAccountMenuOpen(null); return; }
+                                  if (isActive || isSwitchingAccount) return;
+                                  setIsSwitchingAccount(acc.phone);
+                                  try {
+                                    localStorage.setItem('customer_phone', acc.phone);
+                                    localStorage.removeItem('customer_id');
+                                    if (onPhoneValidated) await onPhoneValidated(acc.phone);
+                                    await fetchOrders(acc.phone);
+                                    await fetchSavedAccounts();
+                                    // Stay in list as requested
+                                  } finally {
+                                    setIsSwitchingAccount(null);
+                                  }
+                                }}
+                                className={`w-full rounded-2xl border ${language === 'ar' ? 'p-4 pl-12 text-right' : 'p-4 pr-12 text-left'} transition-all ${isActive
+                                  ? 'border-primary bg-primary/20 ring-1 ring-primary/30'
+                                  : 'border-primary/40 bg-primary/10 hover:bg-primary/15'
+                                  }`}
+                                style={{ pointerEvents: isSwitchingAccount && isSwitchingAccount !== acc.phone ? 'none' : 'auto', opacity: isSwitchingAccount && isSwitchingAccount !== acc.phone ? 0.6 : 1 }}
+                              >
+                                <div className={`flex items-center gap-3 ${language === 'en' ? 'flex-row-reverse' : ''}`}>
+                                  <div className="flex h-11 w-11 items-center justify-center rounded-full bg-primary/25 text-lg font-black text-white shrink-0">
+                                    {isSwitchingAccount === acc.phone ? (
+                                      <div className="h-5 w-5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                                    ) : initial}
+                                  </div>
+                                  <div className={`flex-1 min-w-0 ${language === 'en' ? 'text-left' : 'text-right'}`}>
+                                    <div className={`flex items-center gap-2 ${language === 'en' ? 'justify-end flex-row-reverse' : 'justify-start'}`}>
+                                      <p className="text-white text-base font-black truncate">{acc.name || (language === 'ar' ? 'بدون اسم' : 'No Name')}</p>
+                                      {isActive && (
+                                        <span className="text-[10px] font-black uppercase tracking-wider text-primary bg-primary/10 px-2 py-0.5 rounded-md border border-primary/20 shrink-0">
+                                          {language === 'ar' ? 'نشط' : 'Active'}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <p className="text-xs text-muted" dir="ltr">{acc.phone}</p>
+                                  </div>
+                                </div>
+                              </button>
+                              {/* Three-dot menu button — positioned inside the card area but not overlapping content */}
+                              <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); setAccountMenuOpen(menuOpen ? null : acc.phone); }}
+                                className={`absolute ${language === 'ar' ? 'left-2' : 'right-2'} top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-lg text-muted hover:text-white hover:bg-white/10 transition-colors z-[5]`}
+                              >
+                                <MoreVertical className="w-4 h-4" />
+                              </button>
+                              {/* Dropdown menu */}
+                              {menuOpen && (
+                                <>
+                                  {/* Invisible backdrop to catch clicks outside the menu */}
+                                  <div className="fixed inset-0 z-[35]" onClick={(e) => { e.stopPropagation(); setAccountMenuOpen(null); }} />
+                                  <div className={`absolute ${language === 'ar' ? 'left-2' : 'right-2'} top-full mt-1 z-[40] w-44 rounded-xl border border-primary/40 bg-[hsl(var(--color-surface))] shadow-2xl overflow-hidden`}>
+                                    {isActive && (
+                                      <button
+                                        type="button"
+                                        onClick={async (e) => {
+                                          e.stopPropagation();
+                                          setAccountMenuOpen(null);
+                                          // Clear all active-account state without triggering fetchOrders
+                                          // (fetchOrders would re-select via device fingerprint fallback)
+                                          localStorage.removeItem('customer_phone');
+                                          localStorage.removeItem('customer_id');
+                                          setProfileCustomer(null);
+                                          setProfileCustomerId(null);
+                                          setEditingCustomerId(null);
+                                          setProfileDraft(prev => ({ ...prev, name: '', phone: '' }));
+                                          if (onPhoneValidated) await onPhoneValidated('');
+                                          // Refresh list but stay in switch_accounts
+                                          await fetchSavedAccounts();
+                                        }}
+                                        className="w-full flex items-center gap-2.5 px-4 py-3 text-right text-xs font-bold text-white hover:bg-white/5 transition-colors border-b border-white/5"
+                                      >
+                                        <XCircle className="w-4 h-4 text-muted shrink-0" />
+                                        <span>{language === 'ar' ? 'إلغاء الاختيار' : 'Deselect'}</span>
+                                      </button>
+                                    )}
+
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setAccountMenuOpen(null);
+                                        setLogoutConfirm({ name: acc.name, phone: acc.phone });
+                                      }}
+                                      className="w-full flex items-center gap-2.5 px-4 py-3 text-right text-xs font-bold text-red-400 hover:bg-red-500/5 transition-colors"
+                                    >
+                                      <LogOut className="w-4 h-4 shrink-0" />
+                                      <span>{language === 'ar' ? 'تسجيل الخروج' : 'Logout'}</span>
+                                    </button>
+                                  </div>
+                                </>
+                              )}
                             </div>
-                            <p className="text-xs text-muted">
-                              {[profileCustomer?.street, profileCustomer?.area, profileCustomer?.city].filter(Boolean).join(', ')}
-                            </p>
-                          </div>
-                        ) : (
-                          <p className="text-xs text-muted">{language === 'ar' ? 'اضغط لإضافة عنوان' : 'Tap to add address'}</p>
+                          );
+                        })}
+
+                        {savedAccounts.length < 5 && (
+                          <button
+                            type="button"
+                            onClick={() => { setSettingsView('add_account'); setAccountMenuOpen(null); }}
+                            className="w-full rounded-2xl border border-dashed border-primary/40 bg-surface/40 p-4 text-center transition-colors hover:bg-primary/5 mt-4"
+                          >
+                            <span className="flex items-center justify-center gap-2 text-sm font-black text-white">
+                              <Plus className="h-4 w-4 text-primary" />
+                              <span>{language === 'ar' ? 'إضافة حساب جديد' : 'Add new account'}</span>
+                            </span>
+                          </button>
                         )}
-                      </button>
+                      </div>
                     </div>
                   )}
+
+                  {settingsView === 'add_account' && (
+                    <AddAccountBlock
+                      language={language}
+                      phoneChrome={phoneChrome}
+                      onBack={() => setSettingsView(savedAccounts.length >= 2 ? 'switch_accounts' : 'main')}
+                      onSuccess={async (phone) => {
+                        localStorage.setItem('customer_phone', phone);
+                        localStorage.removeItem('customer_id');
+                        if (onPhoneValidated) await onPhoneValidated(phone);
+                        await fetchOrders(phone);
+                        await fetchSavedAccounts();
+                        setSettingsView('switch_accounts');
+                      }}
+                    />
+                  )}
+
+                  {settingsView === 'account' && (() => {
+                    // Determine which account to display in edit view
+                    const editPhone = viewingAccountPhone || profileCustomer?.phone || '';
+                    const editAccount = savedAccounts.find(a => a.phone === editPhone);
+                    const editName = editAccount?.name || displayName;
+                    const editDisplayPhone = editAccount?.phone || displayPhone;
+                    const editHasInfo = !!(editName?.trim() || editDisplayPhone?.trim());
+                    return (
+                      <div className={`space-y-3 flex flex-col ${phoneChrome ? 'profile-mobile-push' : ''}`}>
+                        <button
+                          type="button"
+                          onClick={() => { setSettingsView(accountEditBackTarget); setViewingAccountPhone(null); setAccountEditBackTarget('main'); }}
+                          className="inline-flex w-auto self-start items-center gap-1 rounded-lg border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-black text-white"
+                        >
+                          <ChevronRight className="h-3.5 w-3.5" />
+                          {language === 'ar' ? 'رجوع' : 'Back'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            // Save snapshot so Back can discard unsaved changes
+                            profileDraftSnapshotRef.current = { ...profileDraft };
+                            setSettingsView('data');
+                          }}
+                          className="w-full rounded-xl border border-primary/35 bg-dark/70 p-4 text-right hover:bg-white/5 transition-colors"
+                        >
+                          <div className="mb-2 flex items-center justify-between">
+                            <h4 className="text-sm font-black text-white">{language === 'ar' ? 'معلومات الطلب' : 'Order Information'}</h4>
+                            <div className="w-8 h-8 flex items-center justify-center rounded-full bg-primary/10 text-primary">
+                              <Pencil className="w-4 h-4" />
+                            </div>
+                          </div>
+                          {editHasInfo ? (
+                            <div className="space-y-1 text-xs text-muted">
+                              <p>{editName || '—'}</p>
+                              <p dir="ltr">{editDisplayPhone || '—'}</p>
+                            </div>
+                          ) : (
+                            <p className="text-xs text-muted">{language === 'ar' ? 'اضغط لتعديل البيانات' : 'Tap to edit data'}</p>
+                          )}
+                        </button>
+
+
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            // Save snapshot so Back can discard unsaved changes
+                            profileDraftSnapshotRef.current = { ...profileDraft };
+                            addressTypeSnapshotRef.current = profileAddressType;
+                            addressTabIdSnapshotRef.current = activeProfileAddressTabId;
+                            setSettingsView('addresses');
+                          }}
+                          className="w-full rounded-xl border border-primary/35 bg-dark/70 p-4 text-right"
+                        >
+                          <div className="mb-2 flex items-center justify-between">
+                            <h4 className="text-sm font-black text-white">{language === 'ar' ? 'العناوين' : 'Addresses'}</h4>
+                            {!hasAddressSummary && <Plus className="h-4 w-4 text-primary" />}
+                          </div>
+                          {hasAddressSummary && typeof mapLat === 'number' && typeof mapLng === 'number' ? (
+                            <div className="space-y-2">
+                              <div className="overflow-hidden rounded-lg border border-primary/30">
+                                <InteractiveMap
+                                  latitude={mapLat}
+                                  longitude={mapLng}
+                                  onLocationChange={() => { }}
+                                  isEditing={false}
+                                  className="!h-28"
+                                />
+                              </div>
+                              <p className="text-xs text-muted">
+                                {[profileCustomer?.street, profileCustomer?.area, profileCustomer?.city].filter(Boolean).join(', ')}
+                              </p>
+                            </div>
+                          ) : (
+                            <p className="text-xs text-muted">{language === 'ar' ? 'اضغط لإضافة عنوان' : 'Tap to add address'}</p>
+                          )}
+                        </button>
+
+                        {/* Spacer to push logout to bottom */}
+                        <div className="flex-1 mt-6" />
+
+                        {/* Logout button — pinned at bottom */}
+                        {editDisplayPhone && (
+                          <button
+                            type="button"
+                            onClick={() => setLogoutConfirm({ name: editName || '', phone: editDisplayPhone })}
+                            className="w-full flex items-center justify-center gap-2 rounded-xl border border-red-500/10 bg-transparent py-3 text-sm font-black text-red-500/70 transition-all hover:bg-red-500/5 active:scale-[0.98]"
+                          >
+                            <LogOut className="w-4 h-4" />
+                            <span>{language === 'ar' ? 'تسجيل الخروج' : 'Logout'}</span>
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {settingsView === 'data' && (
                     <div className={`space-y-3 ${phoneChrome ? 'profile-mobile-push' : ''}`}>
                       <button
                         type="button"
-                        onClick={() => setSettingsView('account')}
-                        className="inline-flex items-center gap-1 rounded-lg border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-black text-white"
+                        onClick={() => {
+                          // Discard unsaved changes
+                          if (profileDraftSnapshotRef.current) {
+                            setProfileDraft(profileDraftSnapshotRef.current);
+                            profileDraftSnapshotRef.current = null;
+                          }
+                          setSettingsView('account');
+                        }}
+                        className="inline-flex w-auto self-start items-center gap-1 rounded-lg border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-black text-white"
                       >
                         <ChevronRight className="h-3.5 w-3.5" />
                         {language === 'ar' ? 'رجوع' : 'Back'}
@@ -1111,7 +1625,12 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                         <label className="mb-1 block text-right text-xs text-muted">{language === 'ar' ? 'رقم الهاتف' : 'Phone Number'}</label>
                         <input
                           value={profileDraft.phone}
-                          onChange={(e) => setProfileDraft((p) => ({ ...p, phone: e.target.value.replace(/\D/g, '') }))}
+                          maxLength={15}
+                          onChange={(e) => {
+                            const next = e.target.value.replace(/\D/g, '').slice(0, 15);
+                            setProfileDraft((p) => ({ ...p, phone: next }));
+                            if (profilePhoneError) setProfilePhoneError(null);
+                          }}
                           placeholder={language === 'ar' ? 'رقم الهاتف' : 'Phone'}
                           className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-right text-sm text-white"
                           dir="ltr"
@@ -1121,7 +1640,12 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                         <div className="relative">
                           <input
                             value={profileDraft.secondary_phone}
-                            onChange={(e) => setProfileDraft((p) => ({ ...p, secondary_phone: e.target.value.replace(/\D/g, '') }))}
+                            maxLength={15}
+                            onChange={(e) => {
+                              const next = e.target.value.replace(/\D/g, '').slice(0, 15);
+                              setProfileDraft((p) => ({ ...p, secondary_phone: next }));
+                              if (profilePhoneError) setProfilePhoneError(null);
+                            }}
                             placeholder={language === 'ar' ? 'رقم إضافي (اختياري)' : 'Secondary phone (optional)'}
                             className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-right text-sm text-white"
                             dir="ltr"
@@ -1146,6 +1670,9 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                           {language === 'ar' ? 'إضافة رقم هاتف احتياطي' : 'Add secondary phone'}
                         </button>
                       )}
+                      {profilePhoneError && (
+                        <p className="text-red-400 text-right text-sm font-bold">{profilePhoneError}</p>
+                      )}
                       <button
                         type="button"
                         disabled={profileSaving}
@@ -1161,44 +1688,132 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                     <div className={`space-y-3 text-right ${phoneChrome ? 'profile-mobile-push' : ''}`}>
                       <button
                         type="button"
-                        onClick={() => setSettingsView('account')}
-                        className="inline-flex items-center gap-1 rounded-lg border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-black text-white"
+                        onClick={() => {
+                          // Discard unsaved changes and restore full snapshot including defaultPickupTime
+                          if (profileDraftSnapshotRef.current) {
+                            setProfileDraft(profileDraftSnapshotRef.current);
+                            setProfileAddressType(addressTypeSnapshotRef.current);
+                            setActiveProfileAddressTabId(addressTabIdSnapshotRef.current);
+                            // Restore defaultPickupTime state and localStorage
+                            const restoredTime = (profileDraftSnapshotRef.current as any).default_pickup_time || null;
+                            setDefaultPickupTime(restoredTime || null);
+                            if (restoredTime) {
+                              localStorage.setItem('default_pickup_time', restoredTime);
+                            } else {
+                              localStorage.removeItem('default_pickup_time');
+                            }
+                            profileDraftSnapshotRef.current = null;
+                          }
+                          setSettingsView('account');
+                        }}
+                        className="inline-flex w-auto self-start items-center gap-1 rounded-lg border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-black text-white"
                       >
                         <ChevronRight className="h-3.5 w-3.5" />
                         {language === 'ar' ? 'رجوع' : 'Back'}
                       </button>
                       <h4 className="text-sm font-black text-white">{language === 'ar' ? 'العناوين' : 'Addresses'}</h4>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (phoneChrome) setSettingsView('map');
-                          else setDesktopAddressMapOverlayOpen(true);
-                        }}
-                        className="w-full rounded-lg border border-primary/35 bg-primary/10 px-3 py-2 text-xs font-black text-primary"
-                      >
-                        {language === 'ar' ? 'تعديل الموقع' : 'Edit Location'}
-                      </button>
+
                       {typeof mapLat === 'number' && typeof mapLng === 'number' && (
-                        <p className="text-xs font-mono text-purple-400">{mapLat.toFixed(6)}, {mapLng.toFixed(6)}</p>
+                        <div className="overflow-hidden rounded-xl border border-primary/35 bg-dark mb-2">
+                          <InteractiveMap
+                            latitude={mapLat}
+                            longitude={mapLng}
+                            onLocationChange={() => { }}
+                            isEditing={false}
+                            className="!h-32 sm:!h-40"
+                          />
+                          <div className="px-3 py-1.5 bg-primary/5 flex justify-between items-center">
+                            <p className="text-[10px] font-mono text-purple-400">{mapLat.toFixed(6)}, {mapLng.toFixed(6)}</p>
+                            <span className="text-[10px] text-muted">{language === 'ar' ? 'معاينة الموقع' : 'Location Preview'}</span>
+                          </div>
+                        </div>
                       )}
-                      <div className="flex flex-wrap justify-end gap-2 items-center">
-                        {profileSavedAddressTabs.length < 4 && (
+
+                      {typeof mapLat === 'number' && typeof mapLng === 'number' ? (
+                        <div className="flex items-center gap-2">
                           <button
                             type="button"
                             onClick={() => {
-                              setShowProfileCustomAddressInput((v) => !v);
-                              if (!showProfileCustomAddressInput) setNewProfileAddressName(profileAddressTypeLabel);
+                              locationBackupRef.current = {
+                                latitude: profileDraft.latitude,
+                                longitude: profileDraft.longitude
+                              };
+                              setSettingsView('map');
                             }}
-                            className={`w-8 h-8 rounded-lg border flex items-center justify-center transition-all ${showProfileCustomAddressInput ? 'bg-red-500/20 text-red-300 border-red-400/60 rotate-180' : 'bg-dark border-primary/30 text-primary hover:bg-primary/10'
-                              }`}
-                            title={language === 'ar' ? 'إضافة عنوان مخصص' : 'Add custom address'}
+                            className="w-8 h-8 flex items-center justify-center rounded-lg border border-primary/35 bg-primary/10 text-primary transition-all active:scale-[0.95]"
+                            title={language === 'ar' ? 'تعديل الموقع' : 'Edit Location'}
                           >
-                            {showProfileCustomAddressInput ? <X className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
+                            <Pencil className="w-4 h-4" />
                           </button>
+                          <button
+                            type="button"
+                            onClick={() => setShowDefaultTimePicker(true)}
+                            className="w-8 h-8 flex items-center justify-center rounded-lg border border-amber-500/35 bg-amber-500/10 text-amber-500 transition-all active:scale-[0.95]"
+                            title={language === 'ar' ? 'موعد الاستلام التلقائي' : 'Default Pickup Time'}
+                          >
+                            <Clock className="w-4 h-4" />
+                          </button>
+                          <div className="text-right flex-1">
+                            <p className="text-[10px] text-muted font-bold">
+                              {language === 'ar' ? 'موعد الاستلام التلقائي:' : 'Default Pickup Time:'}
+                            </p>
+                            <p className="text-[10px] text-amber-200 font-black">
+                              {defaultPickupTime || (language === 'ar' ? 'غير محدد' : 'Not set')}
+                            </p>
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            locationBackupRef.current = {
+                              latitude: undefined,
+                              longitude: undefined
+                            };
+                            setSettingsView('map');
+                          }}
+                          className="w-full flex items-center justify-center gap-2 rounded-xl border-2 border-dashed border-primary/35 bg-primary/5 py-3 text-sm font-black text-primary transition-all hover:bg-primary/10 active:scale-[0.98]"
+                        >
+                          <Plus className="w-4 h-4" />
+                          <span>{language === 'ar' ? 'إضافة موقع' : 'Add Location'}</span>
+                        </button>
+                      )}
+                      <div className="flex flex-wrap justify-end gap-2 items-center">
+                        {profileSavedAddressTabs.length < 4 && (
+                          <div ref={customAddressAnchorRef} className="relative inline-flex flex-col items-stretch align-top">
+                            <button
+                              type="button"
+                              data-address-name-trigger
+                              onClick={() => {
+                                if (showProfileCustomAddressInput) {
+                                  setShowProfileCustomAddressInput(false);
+                                  setPendingProfileAddressType(null);
+                                  setAddressNamePopoverPos(null);
+                                  setNewProfileAddressName('');
+                                  return;
+                                }
+                                setShowProfileCustomAddressInput(true);
+                                setPendingProfileAddressType(
+                                  profileAddressType === 'house' || profileAddressType === 'workplace'
+                                    ? profileAddressType
+                                    : 'apartment'
+                                );
+                                setNewProfileAddressName(profileAddressTypeLabel);
+                              }}
+                              className={`w-8 h-8 rounded-lg border flex items-center justify-center transition-all ${showProfileCustomAddressInput ? 'bg-red-500/20 text-red-300 border-red-400/60 rotate-180' : 'bg-dark border-primary/30 text-primary hover:bg-primary/10'
+                                }`}
+                              title={language === 'ar' ? 'إضافة عنوان مخصص' : 'Add custom address'}
+                            >
+                              {showProfileCustomAddressInput ? <X className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
+                            </button>
+                          </div>
                         )}
                         <button
                           type="button"
-                          onClick={() => switchAddressTab('builtin-apartment', 'apartment')}
+                          onClick={() => {
+                            switchAddressTab('builtin-apartment', 'apartment');
+                            if (showProfileCustomAddressInput) setPendingProfileAddressType('apartment');
+                          }}
                           className={`px-3 py-1.5 rounded-lg border text-xs flex items-center gap-1.5 ${activeProfileAddressTabId === 'builtin-apartment' ? 'bg-primary text-white border-primary' : 'bg-dark border-primary/30 text-primary'}`}
                         >
                           <Building className="w-3.5 h-3.5" />
@@ -1206,7 +1821,10 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                         </button>
                         <button
                           type="button"
-                          onClick={() => switchAddressTab('builtin-house', 'house')}
+                          onClick={() => {
+                            switchAddressTab('builtin-house', 'house');
+                            if (showProfileCustomAddressInput) setPendingProfileAddressType('house');
+                          }}
                           className={`px-3 py-1.5 rounded-lg border text-xs flex items-center gap-1.5 ${activeProfileAddressTabId === 'builtin-house' ? 'bg-primary text-white border-primary' : 'bg-dark border-primary/30 text-primary'}`}
                         >
                           <Home className="w-3.5 h-3.5" />
@@ -1214,117 +1832,38 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                         </button>
                         <button
                           type="button"
-                          onClick={() => switchAddressTab('builtin-workplace', 'workplace')}
+                          onClick={() => {
+                            switchAddressTab('builtin-workplace', 'workplace');
+                            if (showProfileCustomAddressInput) setPendingProfileAddressType('workplace');
+                          }}
                           className={`px-3 py-1.5 rounded-lg border text-xs flex items-center gap-1.5 ${activeProfileAddressTabId === 'builtin-workplace' ? 'bg-primary text-white border-primary' : 'bg-dark border-primary/30 text-primary'}`}
                         >
                           <Briefcase className="w-3.5 h-3.5" />
                           <span>{language === 'ar' ? 'مكان عمل' : 'Workplace'}</span>
                         </button>
                         {profileSavedAddressTabs.map((tab) => (
-                          <div key={tab.id} className="relative inline-flex flex-col items-stretch align-top group/profiletab">
+                          <div key={tab.id} className="relative group">
                             <button
                               type="button"
-                              data-profile-tab-anchor={tab.id}
-                              onClick={() => {
-                                if (profileTabLongPressConsumed.current) {
-                                  profileTabLongPressConsumed.current = false;
-                                  return;
-                                }
-                                switchAddressTab(tab.id, tab.type);
-                              }}
-                              onTouchStart={() => onProfileTabTouchStart(tab)}
-                              onTouchEnd={onProfileTabTouchEnd}
-                              onTouchCancel={onProfileTabTouchEnd}
-                              className={`px-2 py-1 rounded-lg border text-xs flex items-center gap-1.5 w-full min-w-0 ${activeProfileAddressTabId === tab.id ? 'bg-primary text-white border-primary' : 'bg-dark border-primary/30 text-primary'}`}
+                              onClick={() => switchAddressTab(tab.id, (tab.data.address_type as any) || 'apartment')}
+                              className={`px-3 py-1.5 rounded-lg border text-xs flex items-center gap-1.5 transition-all ${activeProfileAddressTabId === tab.id ? 'bg-primary text-white border-primary' : 'bg-dark border-primary/30 text-primary hover:bg-primary/5'}`}
                             >
-                              <span className="truncate max-w-[9rem]">{tab.label}</span>
+                              <span>{tab.label}</span>
                             </button>
-                            
-                            <div className={`pointer-events-none absolute left-0 right-0 top-[calc(100%-10px)] z-[70] pt-3 opacity-0 invisible translate-y-1 transition-all duration-150 [@media(hover:hover)]:group-hover/profiletab:pointer-events-auto [@media(hover:hover)]:group-hover/profiletab:visible [@media(hover:hover)]:group-hover/profiletab:opacity-100 [@media(hover:hover)]:group-hover/profiletab:translate-y-0 [@media(hover:none)]:hidden ${renameProfileTabTarget?.id === tab.id ? '[@media(hover:hover)]:!invisible [@media(hover:hover)]:!opacity-0 [@media(hover:hover)]:!pointer-events-none' : ''}`}>
-                              <div className="rounded-lg border border-primary/50 bg-[hsl(var(--color-surface))] shadow-xl flex w-full overflow-hidden">
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.preventDefault(); e.stopPropagation();
-                                    setShowProfileCustomAddressInput(false);
-                                    setRenameProfileTabTarget(tab);
-                                    setRenameProfileTabInput(tab.label);
-                                  }}
-                                  className="flex-1 py-2 flex items-center justify-center text-primary hover:bg-primary/15 transition-colors"
-                                >
-                                  <Edit2 className="w-4 h-4" />
-                                </button>
-                                <div className="w-px bg-primary/25 self-stretch my-1" />
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.preventDefault(); e.stopPropagation();
-                                    removeProfileAddressTab(tab);
-                                  }}
-                                  className="flex-1 py-2 flex items-center justify-center text-red-300 hover:bg-red-500/15 transition-colors"
-                                >
-                                  <X className="w-4 h-4" />
-                                </button>
-                              </div>
-                            </div>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                removeProfileSavedAddressTab(tab);
+                              }}
+                              className="absolute -top-2 -left-2 w-5 h-5 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-lg scale-90 hover:scale-100"
+                              title={language === 'ar' ? 'حذف' : 'Delete'}
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
                           </div>
                         ))}
                       </div>
-                      
-                      {renameProfileTabTarget && (
-                        <div className="space-y-2 rounded-lg border border-primary/25 bg-dark/60 p-2">
-                          <input
-                            value={renameProfileTabInput}
-                            onChange={(e) => setRenameProfileTabInput(e.target.value)}
-                            className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-right text-sm text-white"
-                          />
-                          <div className="flex justify-end gap-2">
-                            <button
-                              type="button"
-                              onClick={() => setRenameProfileTabTarget(null)}
-                              className="rounded-lg border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-black text-white"
-                            >
-                              {language === 'ar' ? 'إلغاء' : 'Cancel'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => renameProfileAddressTab(renameProfileTabTarget, renameProfileTabInput)}
-                              className="rounded-lg bg-primary px-3 py-1.5 text-xs font-black text-white"
-                            >
-                              {language === 'ar' ? 'حفظ' : 'Save'}
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                      {showProfileCustomAddressInput && (
-                        <div className="space-y-2 rounded-lg border border-primary/25 bg-dark/60 p-2">
-                          <input
-                            value={newProfileAddressName}
-                            onChange={(e) => setNewProfileAddressName(e.target.value)}
-                            placeholder={language === 'ar' ? 'اسم العنوان' : 'Address name'}
-                            className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-right text-sm text-white"
-                          />
-                          <div className="flex justify-end gap-2">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setShowProfileCustomAddressInput(false);
-                                setNewProfileAddressName('');
-                              }}
-                              className="rounded-lg border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-black text-white"
-                            >
-                              {language === 'ar' ? 'إلغاء' : 'Cancel'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={addProfileCustomAddressTab}
-                              className="rounded-lg bg-primary px-3 py-1.5 text-xs font-black text-white"
-                            >
-                              {language === 'ar' ? 'إضافة' : 'Add'}
-                            </button>
-                          </div>
-                        </div>
-                      )}
                       {profileAddressType === 'apartment' && (
                         <>
                           <input
@@ -1407,194 +1946,46 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                       </button>
                     </div>
                   )}
-                  {settingsView === 'map' && (
-                    <div className={`text-right ${phoneChrome ? 'fixed inset-0 z-[130] bg-dark profile-mobile-push' : ''}`}>
-                      {phoneChrome && (
-                        <div className="flex h-[100dvh] w-screen flex-col overflow-hidden bg-dark">
-                          <div className="relative flex-1 min-h-0">
-                            <InteractiveMap
-                              latitude={typeof mapLat === 'number' ? mapLat : 30.0444}
-                              longitude={typeof mapLng === 'number' ? mapLng : 31.2357}
-                              onLocationChange={(lat, lng) => setProfileDraft((p) => ({ ...p, latitude: lat, longitude: lng }))}
-                              onAddressChange={(address) =>
-                                setProfileDraft((p) => ({
-                                  ...p,
-                                  street: address.street || p.street,
-                                  area: address.area || p.area,
-                                  city: address.city || p.city,
-                                  building_number: address.buildingNumber || p.building_number
-                                }))
-                              }
-                              isEditing={true}
-                              className="h-full"
-                              containerHeight="100%"
-                            />
-                            <div className="absolute left-3 top-3 z-[700]">
-                              <button
-                                type="button"
-                                onClick={() => setSettingsView('addresses')}
-                                className="rounded-lg border border-white/20 bg-black/45 px-3 py-1.5 text-xs font-black text-white shadow-lg"
-                              >
-                                {language === 'ar' ? 'رجوع' : 'Back'}
-                              </button>
-                            </div>
-                          </div>
-                          <div className="shrink-0">
-                            <button
-                              type="button"
-                              onClick={() => setSettingsView('addresses')}
-                              className="w-full bg-primary py-4 text-sm font-black text-white shadow-[0_-10px_24px_rgba(0,0,0,0.35)]"
-                            >
-                              {language === 'ar' ? 'تأكيد الموقع' : 'Confirm Location'}
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
+                  {/* Mobile map editor section removed, moved to end of file for all platforms */}
                 </div>
 
-                {settingsView === 'main' && (
-                <>
-                <h3 className="text-xl font-bold text-white mb-4 text-right">
-                  {language === 'ar' ? 'الأعدادات' : 'Settings'}
-                </h3>
+                {/* Merged into main block above */}
 
-                <div className="space-y-4">
-                  {/* Account Security (phone password) - show only for registered customer accounts */}
-                  {profileCustomerId && (
-                  <div className="bg-dark/50 rounded-lg p-4 border border-amber-500/25">
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-3">
-                        <Lock className="w-5 h-5 text-amber-400" />
-                        <span className="text-white font-bold">
-                          {language === 'ar' ? 'أمان الحساب' : 'Account security'}
-                        </span>
-                      </div>
-                      {securityLoading && (
-                        <span className="text-[11px] text-muted">{language === 'ar' ? 'جاري التحميل…' : 'Loading…'}</span>
-                      )}
-                    </div>
+                {settingsView === 'security' && (
+                  <div className={`space-y-4 ${phoneChrome ? 'profile-mobile-push' : ''}`}>
+                    <button
+                      type="button"
+                      onClick={() => setSettingsView('main')}
+                      className="inline-flex w-auto self-start items-center gap-1 rounded-lg border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-black text-white"
+                    >
+                      <ChevronRight className="h-3.5 w-3.5" />
+                      {language === 'ar' ? 'رجوع' : 'Back'}
+                    </button>
 
-                    <p className="text-[11px] text-gray-400 text-right leading-relaxed mb-3">
-                      {language === 'ar'
-                        ? 'يمكنك إضافة كلمة مرور مرتبطة برقمك (اختياري). عند تسجيل الدخول من جهاز آخر سيُطلب إدخالها. إذا نسيتها استخدم كود الاسترجاع.'
-                        : 'You can set an optional password for your phone. Other devices will be asked for it. If you forget it, use the recovery code.'}
-                    </p>
-
-                    {secErr && <p className="text-red-400 text-[11px] font-black text-right mb-2">{secErr}</p>}
-
-                    {!hasPhonePassword ? (
-                      <div className="space-y-2">
-                        <div className="grid grid-cols-1 gap-2">
-                          <input
-                            type="password"
-                            value={secPwd1}
-                            onChange={(e) => {
-                              setSecPwd1(e.target.value);
-                              setSecErr(null);
-                              setSecNewRecoveryShown(null);
-                            }}
-                            className="w-full bg-gray-900 border border-amber-500/35 rounded-lg px-3 py-2 text-white text-right text-sm"
-                            placeholder={language === 'ar' ? 'كلمة المرور (اختياري)' : 'Password (optional)'}
-                            dir="ltr"
-                          />
-                          <input
-                            type="password"
-                            value={secPwd2}
-                            onChange={(e) => {
-                              setSecPwd2(e.target.value);
-                              setSecErr(null);
-                              setSecNewRecoveryShown(null);
-                            }}
-                            className="w-full bg-gray-900 border border-amber-500/35 rounded-lg px-3 py-2 text-white text-right text-sm"
-                            placeholder={language === 'ar' ? 'تأكيد كلمة المرور' : 'Confirm password'}
-                            dir="ltr"
-                          />
+                    <div className="bg-dark/50 rounded-2xl p-6 border border-amber-500/25">
+                      <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center gap-3">
+                          <Lock className="w-6 h-6 text-amber-400" />
+                          <h3 className="text-lg font-black text-white">
+                            {language === 'ar' ? 'أمان الحساب' : 'Account security'}
+                          </h3>
                         </div>
-                        <button
-                          type="button"
-                          disabled={secBusy}
-                          onClick={async () => {
-                            if (!profileCustomerId || !customerPhone) return;
-                            setSecErr(null);
-                            setSecNewRecoveryShown(null);
-                            if (secPwd1.trim().length < 4) {
-                              setSecErr(language === 'ar' ? 'كلمة المرور 4 أحرف على الأقل.' : 'Password must be at least 4 characters.');
-                              return;
-                            }
-                            if (secPwd1 !== secPwd2) {
-                              setSecErr(language === 'ar' ? 'تأكيد كلمة المرور غير مطابق.' : 'Passwords do not match.');
-                              return;
-                            }
-                            setSecBusy(true);
-                            try {
-                              const fp = getOrCreateDeviceFingerprint();
-                              const pwdHash = await hashPhonePassword(customerPhone, secPwd1.trim());
-                              const newRecovery = generateEasyRecoveryCode();
-                              const recHash = await hashRecoveryCode(customerPhone, newRecovery);
-                              const { error } = await supabase
-                                .from('customers')
-                                .update({
-                                  phone_password_hash: pwdHash,
-                                  phone_recovery_code_hash: recHash,
-                                  phone_password_owner_fingerprint: fp,
-                                  updated_at: new Date().toISOString()
-                                })
-                                .eq('id', profileCustomerId);
-                              if (error) throw error;
-                              setHasPhonePassword(true);
-                              setSecPwd1('');
-                              setSecPwd2('');
-                              setSecNewRecoveryShown(newRecovery);
-                            } catch (e) {
-                              console.error(e);
-                              setSecErr(language === 'ar' ? 'تعذر حفظ كلمة المرور.' : 'Could not save password.');
-                            } finally {
-                              setSecBusy(false);
-                            }
-                          }}
-                          className="w-full bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white py-2.5 rounded-lg font-black text-sm"
-                        >
-                          {language === 'ar' ? 'حفظ كلمة المرور' : 'Save password'}
-                        </button>
+                        {securityLoading && (
+                          <span className="text-xs text-muted">{language === 'ar' ? 'جاري التحميل…' : 'Loading…'}</span>
+                        )}
                       </div>
-                    ) : (
-                      <div className="space-y-2">
-                        <p className="text-[11px] text-amber-200/90 text-right font-bold">
-                          {language === 'ar' ? 'كلمة المرور مفعّلة على هذا الرقم.' : 'Password is enabled for this phone.'}
-                        </p>
-                        <button
-                          type="button"
-                          onClick={() => setSecurityDetailsOpen((v) => !v)}
-                          className="w-full flex items-center justify-between rounded-lg border border-amber-500/25 bg-black/10 px-3 py-2 text-amber-200 font-black text-xs"
-                        >
-                          <span>{language === 'ar' ? 'إظهار التفاصيل' : 'Show details'}</span>
-                          <span className="text-[10px] text-amber-200/70">
-                            {securityDetailsOpen ? (language === 'ar' ? 'إخفاء' : 'Hide') : (language === 'ar' ? 'فتح' : 'Open')}
-                          </span>
-                        </button>
 
-                        {securityDetailsOpen && (
-                          <div className="rounded-lg border border-amber-500/20 bg-black/15 p-2 space-y-2">
-                          <p className="text-[11px] text-gray-300 text-right">
-                            {language === 'ar'
-                              ? 'لتغيير كلمة المرور في أي وقت: أدخل كود الاسترجاع ثم ضع كلمة مرور جديدة. سيتم إنشاء كود استرجاع جديد تلقائياً.'
-                              : 'To change password anytime: enter recovery code, set a new password. A new recovery code will be generated.'}
-                          </p>
-                          <input
-                            type="tel"
-                            value={secRecoveryInput}
-                            onChange={(e) => {
-                              setSecRecoveryInput(e.target.value.replace(/\\D/g, '').slice(0, 6));
-                              setSecErr(null);
-                              setSecNewRecoveryShown(null);
-                            }}
-                            className="w-full bg-gray-900 border border-amber-500/30 rounded-lg px-3 py-2 text-white text-right text-sm font-black"
-                            placeholder={language === 'ar' ? 'كود الاسترجاع (6 أرقام)' : 'Recovery code (6 digits)'}
-                            dir="ltr"
-                          />
-                          <div className="grid grid-cols-1 gap-2">
+                      <p className="text-sm text-gray-400 text-right leading-relaxed mb-6">
+                        {language === 'ar'
+                          ? 'يمكنك إضافة كلمة مرور مرتبطة برقمك (اختياري). عند تسجيل الدخول من جهاز آخر سيُطلب إدخالها. إذا نسيتها استخدم كود الاسترجاع.'
+                          : 'You can set an optional password for your phone. Other devices will be asked for it. If you forget it, use the recovery code.'}
+                      </p>
+
+                      {secErr && <p className="text-red-400 text-xs font-black text-right mb-4">{secErr}</p>}
+
+                      {!hasPhonePassword ? (
+                        <div className="space-y-4">
+                          <div className="grid grid-cols-1 gap-3">
                             <input
                               type="password"
                               value={secPwd1}
@@ -1603,8 +1994,8 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                 setSecErr(null);
                                 setSecNewRecoveryShown(null);
                               }}
-                              className="w-full bg-gray-900 border border-amber-500/30 rounded-lg px-3 py-2 text-white text-right text-sm"
-                              placeholder={language === 'ar' ? 'كلمة مرور جديدة' : 'New password'}
+                              className="w-full bg-gray-900 border border-amber-500/35 rounded-xl px-4 py-3 text-white text-right text-sm"
+                              placeholder={language === 'ar' ? 'كلمة المرور (اختياري)' : 'Password (optional)'}
                               dir="ltr"
                             />
                             <input
@@ -1615,7 +2006,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                 setSecErr(null);
                                 setSecNewRecoveryShown(null);
                               }}
-                              className="w-full bg-gray-900 border border-amber-500/30 rounded-lg px-3 py-2 text-white text-right text-sm"
+                              className="w-full bg-gray-900 border border-amber-500/35 rounded-xl px-4 py-3 text-white text-right text-sm"
                               placeholder={language === 'ar' ? 'تأكيد كلمة المرور' : 'Confirm password'}
                               dir="ltr"
                             />
@@ -1627,10 +2018,6 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                               if (!profileCustomerId || !customerPhone) return;
                               setSecErr(null);
                               setSecNewRecoveryShown(null);
-                              if (secRecoveryInput.length !== 6) {
-                                setSecErr(language === 'ar' ? 'أدخل كود استرجاع صحيح (6 أرقام).' : 'Enter a 6-digit recovery code.');
-                                return;
-                              }
                               if (secPwd1.trim().length < 4) {
                                 setSecErr(language === 'ar' ? 'كلمة المرور 4 أحرف على الأقل.' : 'Password must be at least 4 characters.');
                                 return;
@@ -1641,265 +2028,333 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                               }
                               setSecBusy(true);
                               try {
-                                const { data: row } = await supabase
-                                  .from('customers')
-                                  .select('phone_recovery_code_hash')
-                                  .eq('id', profileCustomerId)
-                                  .maybeSingle();
-                                const expected = (row as any)?.phone_recovery_code_hash as string | null | undefined;
-                                if (!expected) {
-                                  setSecErr(language === 'ar' ? 'لا يوجد كود استرجاع محفوظ لهذا الرقم.' : 'No recovery code saved for this number.');
-                                  return;
-                                }
-                                const recHash = await hashRecoveryCode(customerPhone, secRecoveryInput);
-                                if (recHash !== expected) {
-                                  setSecErr(language === 'ar' ? 'كود الاسترجاع غير صحيح.' : 'Invalid recovery code.');
-                                  return;
-                                }
                                 const fp = getOrCreateDeviceFingerprint();
                                 const pwdHash = await hashPhonePassword(customerPhone, secPwd1.trim());
-                                const { data: existingPwdRow } = await supabase
-                                  .from('customers')
-                                  .select('phone_password_hash')
-                                  .eq('id', profileCustomerId)
-                                  .maybeSingle();
-                                const oldHash = (existingPwdRow as any)?.phone_password_hash as string | null | undefined;
-                                if (oldHash && pwdHash === oldHash) {
-                                  setSecErr(language === 'ar' ? 'لا يمكن اختيار نفس كلمة المرور السابقة.' : 'You cannot reuse the previous password.');
-                                  return;
-                                }
                                 const newRecovery = generateEasyRecoveryCode();
-                                const newRecHash = await hashRecoveryCode(customerPhone, newRecovery);
+                                const recHash = await hashRecoveryCode(customerPhone, newRecovery);
                                 const { error } = await supabase
                                   .from('customers')
                                   .update({
                                     phone_password_hash: pwdHash,
-                                    phone_recovery_code_hash: newRecHash,
+                                    phone_recovery_code_hash: recHash,
                                     phone_password_owner_fingerprint: fp,
                                     updated_at: new Date().toISOString()
                                   })
                                   .eq('id', profileCustomerId);
                                 if (error) throw error;
+                                setHasPhonePassword(true);
                                 setSecPwd1('');
                                 setSecPwd2('');
-                                setSecRecoveryInput('');
                                 setSecNewRecoveryShown(newRecovery);
                               } catch (e) {
                                 console.error(e);
-                                setSecErr(language === 'ar' ? 'تعذر تغيير كلمة المرور.' : 'Could not change password.');
+                                setSecErr(language === 'ar' ? 'تعذر حفظ كلمة المرور.' : 'Could not save password.');
                               } finally {
                                 setSecBusy(false);
                               }
                             }}
-                            className="w-full bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white py-2.5 rounded-lg font-black text-sm"
+                            className="w-full bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white py-3.5 rounded-xl font-black text-sm transition-all active:scale-[0.98]"
                           >
-                            {language === 'ar' ? 'تغيير كلمة المرور' : 'Change password'}
+                            {language === 'ar' ? 'حفظ كلمة المرور' : 'Save password'}
                           </button>
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {secNewRecoveryShown && (
-                      <div className="mt-3 rounded-xl border border-amber-500/35 bg-black/20 p-3 text-center">
-                        <p className="text-[11px] text-amber-100/80 mb-1">
-                          {language === 'ar' ? 'كود استرجاع جديد (احتفظ به):' : 'New recovery code (keep it):'}
-                        </p>
-                        <p className="font-mono text-2xl font-black text-amber-200 tracking-widest">{secNewRecoveryShown}</p>
-                        <p className="text-[10px] text-amber-100/60 mt-1">
-                          {language === 'ar'
-                            ? 'الكود القديم لم يعد صالحاً.'
-                            : 'Old code is no longer valid.'}
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                  )}
-
-                  {/* Language Toggle */}
-                  <div className="flex items-center justify-between bg-dark/50 rounded-lg p-4">
-                    <div className="flex items-center gap-3">
-                      <Globe className="w-5 h-5 text-primary" />
-                      <span className="text-white font-bold">
-                        {language === 'ar' ? 'اللغة' : 'Language'}
-                      </span>
-                    </div>
-                    <button
-                      onClick={() => setLanguage(language === 'ar' ? 'en' : 'ar')}
-                      className="bg-primary hover:bg-primary/80 text-white px-6 py-2 rounded-lg transition-colors font-bold flex items-center gap-2"
-                    >
-                      <Globe className="w-4 h-4" />
-                      <span>{language === 'ar' ? 'العربية' : 'English'}</span>
-                    </button>
-                  </div>
-
-                  {/* Theme Toggle */}
-                  <div className="flex items-center justify-between bg-dark/50 rounded-lg p-4">
-                    <div className="flex items-center gap-3">
-                      {theme === 'dark' ? (
-                        <Moon className="w-5 h-5 text-primary" />
+                        </div>
                       ) : (
-                        <Sun className="w-5 h-5 text-primary" />
-                      )}
-                      <span className="text-white font-bold">
-                        {language === 'ar' ? 'الوضع' : 'Theme'}
-                      </span>
-                    </div>
-                    <button
-                      onClick={toggleTheme}
-                      className="bg-primary hover:bg-primary/80 text-white px-6 py-2 rounded-lg transition-colors font-bold flex items-center gap-2"
-                    >
-                      {theme === 'dark' ? (
-                        <>
-                          <Moon className="w-4 h-4" />
-                          <span>{language === 'ar' ? 'مظلم' : 'Dark'}</span>
-                        </>
-                      ) : (
-                        <>
-                          <Sun className="w-4 h-4" />
-                          <span>{language === 'ar' ? 'فاتح' : 'Light'}</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
+                        <div className="space-y-4">
+                          <p className="text-sm text-amber-200/90 text-right font-bold">
+                            {language === 'ar' ? 'كلمة المرور مفعّلة على هذا الرقم.' : 'Password is enabled for this phone.'}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => setSecurityDetailsOpen((v) => !v)}
+                            className="w-full flex items-center justify-between rounded-xl border border-amber-500/25 bg-black/10 px-4 py-3 text-amber-200 font-black text-sm"
+                          >
+                            <span>{language === 'ar' ? 'إظهار التفاصيل' : 'Show details'}</span>
+                            <span className="text-xs text-amber-200/70">
+                              {securityDetailsOpen ? (language === 'ar' ? 'إخفاء' : 'Hide') : (language === 'ar' ? 'فتح' : 'Open')}
+                            </span>
+                          </button>
 
-                  {/* Coupons Button */}
-                  <div className="relative">
-                    <button
-                      onClick={() => setShowCouponList(true)}
-                      className="w-full flex items-center justify-between bg-dark/50 rounded-lg p-4 hover:bg-dark/70 transition-colors"
-                    >
-                      <div className="flex items-center gap-3">
-                        <TicketPercent className="w-5 h-5 text-primary" />
-                        <span className="text-white font-bold">
-                          {language === 'ar' ? 'الكوبونات' : 'Coupons'}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {customerCoupons.length > 0 && (
-                          <span className="bg-primary text-white rounded-full w-6 h-6 flex items-center justify-center text-xs font-bold shadow-[0_0_10px_rgba(168,85,247,0.5)]">
-                            {customerCoupons.length}
-                          </span>
-                        )}
-                        <span className="text-muted text-sm">
-                          {language === 'ar' ? 'عرض' : 'View'}
-                        </span>
-                      </div>
-                    </button>
+                          {securityDetailsOpen && (
+                            <div className="rounded-xl border border-amber-500/20 bg-black/15 p-4 space-y-4">
+                              <p className="text-xs text-gray-300 text-right leading-relaxed">
+                                {language === 'ar'
+                                  ? 'لتغيير كلمة المرور في أي وقت: أدخل كود الاسترجاع ثم ضع كلمة مرور جديدة. سيتم إنشاء كود استرجاع جديد تلقائياً.'
+                                  : 'To change password anytime: enter recovery code, set a new password. A new recovery code will be generated.'}
+                              </p>
+                              <input
+                                type="tel"
+                                value={secRecoveryInput}
+                                onChange={(e) => {
+                                  setSecRecoveryInput(e.target.value.replace(/\D/g, '').slice(0, 6));
+                                  setSecErr(null);
+                                  setSecNewRecoveryShown(null);
+                                }}
+                                className="w-full bg-gray-900 border border-amber-500/30 rounded-xl px-4 py-3 text-white text-right text-sm font-black"
+                                placeholder={language === 'ar' ? 'كود الاسترجاع (6 أرقام)' : 'Recovery code (6 digits)'}
+                                dir="ltr"
+                              />
+                              <div className="grid grid-cols-1 gap-3">
+                                <input
+                                  type="password"
+                                  value={secPwd1}
+                                  onChange={(e) => {
+                                    setSecPwd1(e.target.value);
+                                    setSecErr(null);
+                                    setSecNewRecoveryShown(null);
+                                  }}
+                                  className="w-full bg-gray-900 border border-amber-500/30 rounded-xl px-4 py-3 text-white text-right text-sm"
+                                  placeholder={language === 'ar' ? 'كلمة مرور جديدة' : 'New password'}
+                                  dir="ltr"
+                                />
+                                <input
+                                  type="password"
+                                  value={secPwd2}
+                                  onChange={(e) => {
+                                    setSecPwd2(e.target.value);
+                                    setSecErr(null);
+                                    setSecNewRecoveryShown(null);
+                                  }}
+                                  className="w-full bg-gray-900 border border-amber-500/30 rounded-xl px-4 py-3 text-white text-right text-sm"
+                                  placeholder={language === 'ar' ? 'تأكيد كلمة المرور' : 'Confirm password'}
+                                  dir="ltr"
+                                />
+                              </div>
+                              <button
+                                type="button"
+                                disabled={secBusy}
+                                onClick={async () => {
+                                  if (!profileCustomerId || !customerPhone) return;
+                                  setSecErr(null);
+                                  setSecNewRecoveryShown(null);
+                                  if (secRecoveryInput.length !== 6) {
+                                    setSecErr(language === 'ar' ? 'أدخل كود استرجاع صحيح (6 أرقام).' : 'Enter a 6-digit recovery code.');
+                                    return;
+                                  }
+                                  if (secPwd1.trim().length < 4) {
+                                    setSecErr(language === 'ar' ? 'كلمة المرور 4 أحرف على الأقل.' : 'Password must be at least 4 characters.');
+                                    return;
+                                  }
+                                  if (secPwd1 !== secPwd2) {
+                                    setSecErr(language === 'ar' ? 'تأكيد كلمة المرور غير مطابق.' : 'Passwords do not match.');
+                                    return;
+                                  }
+                                  setSecBusy(true);
+                                  try {
+                                    const { data: row } = await supabase
+                                      .from('customers')
+                                      .select('phone_recovery_code_hash')
+                                      .eq('id', profileCustomerId)
+                                      .maybeSingle();
+                                    const expected = (row as any)?.phone_recovery_code_hash as string | null | undefined;
+                                    if (!expected) {
+                                      setSecErr(language === 'ar' ? 'لا يوجد كود استرجاع محفوظ لهذا الرقم.' : 'No recovery code saved for this number.');
+                                      return;
+                                    }
+                                    const recHash = await hashRecoveryCode(customerPhone, secRecoveryInput);
+                                    if (recHash !== expected) {
+                                      setSecErr(language === 'ar' ? 'كود الاسترجاع غير صحيح.' : 'Invalid recovery code.');
+                                      return;
+                                    }
+                                    const fp = getOrCreateDeviceFingerprint();
+                                    const pwdHash = await hashPhonePassword(customerPhone, secPwd1.trim());
+                                    const { data: existingPwdRow } = await supabase
+                                      .from('customers')
+                                      .select('phone_password_hash')
+                                      .eq('id', profileCustomerId)
+                                      .maybeSingle();
+                                    const oldHash = (existingPwdRow as any)?.phone_password_hash as string | null | undefined;
+                                    if (oldHash && pwdHash === oldHash) {
+                                      setSecErr(language === 'ar' ? 'لا يمكن اختيار نفس كلمة المرور السابقة.' : 'You cannot reuse the previous password.');
+                                      return;
+                                    }
+                                    const newRecovery = generateEasyRecoveryCode();
+                                    const newRecHash = await hashRecoveryCode(customerPhone, newRecovery);
+                                    const { error } = await supabase
+                                      .from('customers')
+                                      .update({
+                                        phone_password_hash: pwdHash,
+                                        phone_recovery_code_hash: newRecHash,
+                                        phone_password_owner_fingerprint: fp,
+                                        updated_at: new Date().toISOString()
+                                      })
+                                      .eq('id', profileCustomerId);
+                                    if (error) throw error;
+                                    setSecPwd1('');
+                                    setSecPwd2('');
+                                    setSecRecoveryInput('');
+                                    setSecNewRecoveryShown(newRecovery);
+                                  } catch (e) {
+                                    console.error(e);
+                                    setSecErr(language === 'ar' ? 'تعذر تغيير كلمة المرور.' : 'Could not change password.');
+                                  } finally {
+                                    setSecBusy(false);
+                                  }
+                                }}
+                                className="w-full bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white py-3.5 rounded-xl font-black text-sm transition-all active:scale-[0.98]"
+                              >
+                                {language === 'ar' ? 'تغيير كلمة المرور' : 'Change password'}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {secNewRecoveryShown && (
+                        <div className="mt-4 rounded-2xl border border-amber-500/35 bg-black/20 p-4 text-center">
+                          <p className="text-xs text-amber-100/80 mb-2">
+                            {language === 'ar' ? 'كود استرجاع جديد (احتفظ به):' : 'New recovery code (keep it):'}
+                          </p>
+                          <p className="font-mono text-3xl font-black text-amber-200 tracking-widest">{secNewRecoveryShown}</p>
+                          <p className="text-[10px] text-amber-100/60 mt-2">
+                            {language === 'ar'
+                              ? 'الكود القديم لم يعد صالحاً.'
+                              : 'Old code is no longer valid.'}
+                          </p>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-                </>
                 )}
               </div>
             )}
 
-            {/* Coupons Modal */}
-            {showCouponList && (
-              <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-300">
-                <div className="bg-surface w-full max-w-sm rounded-[2.5rem] border-2 border-primary/30 shadow-2xl shadow-primary/20 overflow-hidden scale-in">
-                  <div className="p-6 border-b border-primary/20 flex items-center justify-between bg-dark/80 backdrop-blur-md relative z-10">
-                    <button onClick={() => setShowCouponList(false)} className="p-2 hover:bg-white/10 bg-white/5 rounded-full transition-colors text-white hover:scale-110">
-                      <X className="w-5 h-5" />
-                    </button>
-                    <h3 className="text-xl font-black text-white flex items-center gap-2">
-                      {language === 'ar' ? 'كوبونات الخصم' : 'Your Coupons'}
-                      <TicketPercent className="w-6 h-6 text-primary" />
-                    </h3>
-                  </div>
-                  
-                  <div className="p-5 max-h-[65vh] overflow-y-auto custom-scrollbar space-y-4 bg-surface relative">
-                    <div className="absolute top-0 right-0 w-full h-32 bg-primary/5 blur-3xl pointer-events-none rounded-full"></div>
-                    {customerCoupons.length === 0 ? (
-                      <div className="py-12 text-center relative z-10">
-                        <TicketPercent className="w-20 h-20 text-primary/30 mx-auto mb-4 drop-shadow-[0_0_15px_rgba(168,85,247,0.3)]" />
-                        <p className="text-lg text-primary font-bold">
-                          {language === 'ar' ? 'لا توجد كوبونات متاحة' : 'No available coupons'}
-                        </p>
-                      </div>
-                    ) : (
-                      customerCoupons.map((coupon, idx) => {
-                        const expiresAt = coupon.expires_at ? new Date(coupon.expires_at) : null;
-                        const couponOrders = orders.filter((o) => {
-                          if (o.status === 'cancelled') return false;
-                          return (o as any).applied_coupon_id === coupon.id || (o as any).applied_coupon_code === coupon.code;
-                        });
-                        const totalSaved = couponOrders.reduce((acc, order) => {
-                          const itemsTotal = (order.items || []).reduce((sum, item) => sum + item.subtotal, 0);
-                          const pct = (order as any).applied_coupon_discount_percent || coupon.discount_percent || 0;
-                          const d = pct ? Math.round((itemsTotal * pct) / 100) : 0;
-                          return acc + d;
-                        }, 0);
-                        return (
-                          <div
-                            key={coupon.id}
-                            className="bg-dark/80 rounded-2xl p-5 border border-primary/20 relative overflow-hidden group hover:border-primary/50 transition-all hover:-translate-y-1 shadow-lg shadow-black/50"
-                            style={{ animation: `slideUp 0.4s ease-out forwards`, animationDelay: `${idx * 0.1}s`, opacity: 0 }}
-                          >
-                            {/* Decorative element */}
-                            <div className="absolute -right-6 -top-6 w-24 h-24 bg-primary/10 rounded-full blur-2xl group-hover:bg-primary/20 transition-all"></div>
-                            <div className="absolute -left-6 -bottom-6 w-24 h-24 bg-blue-500/10 rounded-full blur-2xl group-hover:bg-blue-500/20 transition-all"></div>
-                            
-                            <div className="flex items-start justify-between relative z-10">
-                              <div className="text-right flex-1">
-                                <div className="flex items-center justify-end gap-2 mb-3">
-                                  <span className="bg-primary/20 text-primary border border-primary/30 px-3 py-1 rounded-full text-xs font-black shadow-[0_0_10px_rgba(168,85,247,0.2)]">
-                                    {language === 'ar' ? `خصم ${coupon.discount_percent}%` : `${coupon.discount_percent}% OFF`}
-                                  </span>
-                                </div>
-                                <p className="text-[12px] text-green-300 font-black text-right mb-2">
-                                  {language === 'ar'
-                                    ? `وفّرت: ${totalSaved} ج`
-                                    : `Saved: ${totalSaved} EG`}
-                                </p>
-                                <div className="flex items-center justify-end gap-3 mt-4 bg-black/40 p-3 rounded-xl border border-white/5 group-hover:border-white/10 transition-colors">
-                                  <button
-                                    onClick={() => {
-                                      navigator.clipboard.writeText(coupon.code);
-                                      const el = document.getElementById(`copy-${coupon.id}`);
-                                      if (el) {
-                                        el.innerText = language === 'ar' ? 'تم النسخ!' : 'Copied!';
-                                        setTimeout(() => {
-                                          el.innerText = language === 'ar' ? 'نسخ الكود' : 'Copy Code';
-                                        }, 2000);
-                                      }
-                                    }}
-                                    className="text-[10px] text-white/70 hover:text-white transition-colors flex items-center gap-1.5 bg-primary/20 hover:bg-primary/40 px-3 py-1.5 rounded-lg font-bold"
-                                    title={language === 'ar' ? 'نسخ' : 'Copy'}
-                                  >
-                                    <span id={`copy-${coupon.id}`}>{language === 'ar' ? 'نسخ الكود' : 'Copy Code'}</span>
-                                  </button>
-                                  <span className="text-xl font-mono font-black text-white tracking-widest drop-shadow-[0_0_8px_rgba(255,255,255,0.3)]">{coupon.code}</span>
-                                </div>
-                                <div className="mt-2 flex justify-end">
-                                  <button
-                                    type="button"
-                                    onClick={() => setCouponDetailsCode(coupon.code)}
-                                    className="text-[11px] bg-cyan-700 hover:bg-cyan-600 text-white rounded-lg px-3 py-1.5 font-black"
-                                  >
-                                    {language === 'ar' ? 'عرض التفاصيل' : 'View details'}
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-                            {expiresAt && (
-                              <div className="mt-4 pt-4 border-t border-white/5 flex items-center justify-end gap-1.5 text-[10px] text-muted font-bold relative z-10">
-                                <Clock className="w-3.5 h-3.5 text-primary/70" />
-                                <span>
-                                  {language === 'ar'
-                                    ? `صالح حتى ${expiresAt.toLocaleDateString('ar-EG', { year: 'numeric', month: 'long', day: 'numeric' })}`
-                                    : `Valid until ${expiresAt.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}`}
+            {settingsView === 'coupons' && (
+              <div className={`space-y-4 ${phoneChrome ? 'profile-mobile-push' : ''}`}>
+                <div className="flex items-center justify-between">
+                  <button
+                    type="button"
+                    onClick={() => setSettingsView('main')}
+                    className="inline-flex w-auto items-center gap-1 rounded-lg border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-black text-white"
+                  >
+                    <ChevronRight className="h-3.5 w-3.5" />
+                    {language === 'ar' ? 'رجوع' : 'Back'}
+                  </button>
+                  <h3 className="text-lg font-black text-white flex items-center gap-2">
+                    {language === 'ar' ? 'كوبونات الخصم' : 'Your Coupons'}
+                    <TicketPercent className="w-5 h-5 text-primary" />
+                  </h3>
+                </div>
+
+                <div className="space-y-4 max-h-[60vh] overflow-y-auto custom-scrollbar p-1">
+                  {customerCoupons.length === 0 ? (
+                    <div className="py-12 text-center bg-dark/40 rounded-2xl border border-primary/20">
+                      <TicketPercent className="w-16 h-16 text-primary/30 mx-auto mb-4" />
+                      <p className="text-lg text-primary font-bold">
+                        {language === 'ar' ? 'لا توجد كوبونات متاحة' : 'No available coupons'}
+                      </p>
+                    </div>
+                  ) : (
+                    customerCoupons.map((coupon) => {
+                      const expiresAt = coupon.expires_at ? new Date(coupon.expires_at) : null;
+                      const couponOrders = orders.filter((o) => {
+                        if (o.status === 'cancelled') return false;
+                        return (o as any).applied_coupon_id === coupon.id || (o as any).applied_coupon_code === coupon.code;
+                      });
+                      const totalSaved = couponOrders.reduce((acc, order) => {
+                        const itemsTotal = (order.items || []).reduce((sum, item) => sum + item.subtotal, 0);
+                        const pct = (order as any).applied_coupon_discount_percent || coupon.discount_percent || 0;
+                        const d = pct ? Math.round((itemsTotal * pct) / 100) : 0;
+                        return acc + d;
+                      }, 0);
+                      return (
+                        <div
+                          key={coupon.id}
+                          className="bg-surface/60 rounded-2xl p-5 border border-primary/20 relative overflow-hidden group hover:border-primary/50 transition-all shadow-lg"
+                        >
+                          <div className="flex items-start justify-between relative z-10">
+                            <div className="text-right flex-1">
+                              <div className="flex items-center justify-end gap-2 mb-3">
+                                <span className="bg-primary/20 text-primary border border-primary/30 px-3 py-1 rounded-full text-[10px] font-black">
+                                  {language === 'ar' ? `خصم ${coupon.discount_percent}%` : `${coupon.discount_percent}% OFF`}
                                 </span>
                               </div>
-                            )}
+                              <p className="text-[11px] text-green-300 font-black text-right mb-2">
+                                {language === 'ar'
+                                  ? `وفّرت: ${totalSaved} ج`
+                                  : `Saved: ${totalSaved} EG`}
+                              </p>
+                              <div className="flex items-center justify-end gap-3 mt-4 bg-black/40 p-3 rounded-xl border border-white/5">
+                                <button
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(coupon.code);
+                                    const el = document.getElementById(`copy-${coupon.id}`);
+                                    if (el) {
+                                      el.innerText = language === 'ar' ? 'تم النسخ!' : 'Copied!';
+                                      setTimeout(() => {
+                                        el.innerText = language === 'ar' ? 'نسخ الكود' : 'Copy Code';
+                                      }, 2000);
+                                    }
+                                  }}
+                                  className="text-[10px] text-white/70 hover:text-white transition-colors flex items-center gap-1.5 bg-primary/20 hover:bg-primary/40 px-3 py-1.5 rounded-lg font-bold"
+                                >
+                                  <span id={`copy-${coupon.id}`}>{language === 'ar' ? 'نسخ الكود' : 'Copy Code'}</span>
+                                </button>
+                                <span className="text-xl font-mono font-black text-white tracking-widest">{coupon.code}</span>
+                              </div>
+                              <div className="mt-2 flex justify-end">
+                                <button
+                                  type="button"
+                                  onClick={() => setCouponDetailsCode(coupon.code)}
+                                  className="text-[11px] bg-cyan-700/50 hover:bg-cyan-700 text-white rounded-lg px-3 py-1.5 font-black transition-colors"
+                                >
+                                  {language === 'ar' ? 'عرض التفاصيل' : 'View details'}
+                                </button>
+                              </div>
+                            </div>
                           </div>
-                        );
-                      })
-                    )}
-                  </div>
+                          {expiresAt && (
+                            <div className="mt-4 pt-4 border-t border-white/5 flex items-center justify-end gap-1.5 text-[10px] text-muted font-bold">
+                              <Clock className="w-3.5 h-3.5 text-primary/70" />
+                              <span>
+                                {language === 'ar'
+                                  ? `صالح حتى ${expiresAt.toLocaleDateString('ar-EG', { year: 'numeric', month: 'long', day: 'numeric' })}`
+                                  : `Valid until ${expiresAt.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}`}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
                 </div>
               </div>
             )}
 
+            {showDefaultTimePicker && (
+              <TimePicker
+                isOpen={showDefaultTimePicker}
+                onClose={() => setShowDefaultTimePicker(false)}
+                onConfirm={(h, m, ampm) => {
+                  const label = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')} ${ampm}`;
+                  setDefaultPickupTime(label);
+                  localStorage.setItem('default_pickup_time', label);
+                  setProfileDraft(prev => ({ ...prev, default_pickup_time: label }));
+                  setShowDefaultTimePicker(false);
+                  // NOTE: DB write removed — only saved when user presses main "Save" button
+                }}
+                onDelete={() => {
+                  setDefaultPickupTime(null);
+                  localStorage.removeItem('default_pickup_time');
+                  setProfileDraft(prev => ({ ...prev, default_pickup_time: undefined }));
+                  // NOTE: DB write removed — only committed when user presses main "Save" button
+                }}
+                initialHour={(() => {
+                  if (!defaultPickupTime) return 3;
+                  const match = defaultPickupTime.match(/^(\d+):/);
+                  return match ? parseInt(match[1]) : 3;
+                })()}
+                initialMinute={(() => {
+                  if (!defaultPickupTime) return 30;
+                  const match = defaultPickupTime.match(/:(\d+)/);
+                  return match ? parseInt(match[1]) : 30;
+                })()}
+                initialAmPm={(() => {
+                  if (!defaultPickupTime) return 'PM';
+                  return defaultPickupTime.includes('AM') ? 'AM' : 'PM';
+                })()}
+                language={language}
+              />
+            )}
             {couponDetailsCode && (
               <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/80" onClick={() => setCouponDetailsCode(null)}>
                 <div className="bg-surface w-full max-w-sm rounded-2xl border border-primary/30 p-4 text-right" onClick={(e) => e.stopPropagation()}>
@@ -1943,7 +2398,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                     {language === 'ar' ? 'طلباتي' : 'My Orders'}
                   </h3>
                 </div>
-                {loading ? (
+                {loading && orders.length === 0 ? (
                   <div className="text-center py-12">
                     <div className="animate-spin w-12 h-12 border-4 border-purple-500 border-t-transparent rounded-full mx-auto"></div>
                     <p className="text-muted mt-4">{language === 'ar' ? 'جاري التحميل...' : 'Loading...'}</p>
@@ -1978,7 +2433,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                 dir={language === 'ar' ? 'rtl' : 'ltr'}
                               >
                                 {activeOrders.map(order => {
-                                  const statusInfo = getStatusInfo(order.status);
+                                  const statusInfo = getStatusInfo(order.status, order.delivery_method);
                                   const StatusIcon = statusInfo.icon;
                                   const isExpanded = expandedOrderId === order.id;
                                   const isEditingNote = editingNoteOrderId === order.id;
@@ -1992,11 +2447,11 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                   const deliveryFee = order.total_amount - (itemsTotal - discount);
 
                                   return (
-                                      <div
-                                        key={order.id}
-                                        id={`order-${order.id}`}
-                                        className={`snap-center shrink-0 w-[85%] sm:w-[320px] bg-dark/70 border-2 rounded-2xl p-5 shadow-xl transition-all duration-500 flex flex-col hover:border-primary/50 ${order.id === activeHighlightId ? 'order-highlight-glow border-primary' : 'border-primary/20'}`}
-                                      >
+                                    <div
+                                      key={order.id}
+                                      id={`order-${order.id}`}
+                                      className={`snap-center shrink-0 w-[85%] sm:w-[320px] bg-dark/70 border-2 rounded-2xl p-5 shadow-xl transition-all duration-500 flex flex-col hover:border-primary/50 ${order.id === activeHighlightId ? 'order-highlight-glow border-primary' : 'border-primary/20'}`}
+                                    >
                                       <div className="flex items-start justify-between mb-3 relative">
                                         <div className="text-right flex-1 cursor-pointer" onClick={() => setExpandedOrderId(isExpanded ? null : order.id)}>
                                           <p className="text-muted text-[10px] mb-0.5">{language === 'ar' ? 'رقم الطلب' : 'Order ID'}</p>
@@ -2022,6 +2477,64 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                                   onClick={() => setShowActionMenu(null)}
                                                 ></div>
                                                 <div className="absolute top-10 left-0 z-[81] bg-surface border border-primary/30 rounded-xl shadow-2xl py-2 min-w-[150px] animate-in fade-in zoom-in duration-200">
+                                                  {(() => {
+                                                    const isPickup = order.delivery_method === 'pickup';
+                                                    const isUnderReview = order.status === 'under_review';
+
+                                                    // Allow if it's a pickup order, OR if it's under_review (so they can change it to pickup)
+                                                    if (!isPickup && !isUnderReview) return null;
+
+                                                    const deadline = order.pickup_deadline_at ? new Date(order.pickup_deadline_at).getTime() : 0;
+                                                    const hasDeadline = deadline > 0;
+
+                                                    let showPickupAction = false;
+                                                    let pickupActionType: 'add' | 'edit' = 'add';
+
+                                                    if (isUnderReview) {
+                                                      showPickupAction = true;
+                                                      pickupActionType = (isPickup && hasDeadline) ? 'edit' : 'add';
+                                                    } else if (isPickup && hasDeadline) {
+                                                      const now = Date.now();
+                                                      const diffHours = (deadline - now) / (1000 * 60 * 60);
+                                                      const updatedAt = order.pickup_deadline_updated_at ? new Date(order.pickup_deadline_updated_at).getTime() : new Date(order.created_at).getTime();
+                                                      const minsSinceUpdate = (now - updatedAt) / (1000 * 60);
+                                                      if (diffHours > 1 || minsSinceUpdate <= 30) {
+                                                        showPickupAction = true;
+                                                        pickupActionType = 'edit';
+                                                      }
+                                                    }
+
+                                                    if (!showPickupAction) return null;
+
+                                                    return (
+                                                      <button
+                                                        onClick={() => {
+                                                          setShowUpdateTimePicker(order.id);
+                                                          setShowActionMenu(null);
+                                                        }}
+                                                        className="w-full text-right px-4 py-2 hover:bg-primary/10 text-white text-sm font-bold flex items-center justify-between"
+                                                      >
+                                                        <Clock className="w-4 h-4" />
+                                                        <span>
+                                                          {pickupActionType === 'add'
+                                                            ? (language === 'ar' ? 'اضافة موعد للاستلام من الفرع' : 'Add Pickup Time')
+                                                            : (language === 'ar' ? 'تعديل موعد الاستلام' : 'Change Pickup Time')}
+                                                        </span>
+                                                      </button>
+                                                    );
+                                                  })()}
+                                                  {(order.status === 'under_review' || order.status === 'preparing') && (
+                                                    <button
+                                                      onClick={() => {
+                                                        onStartOrderEdit?.(order);
+                                                        setShowActionMenu(null);
+                                                      }}
+                                                      className="w-full text-right px-4 py-2 hover:bg-primary/10 text-white text-sm font-bold flex items-center justify-between"
+                                                    >
+                                                      <Edit2 className="w-4 h-4" />
+                                                      <span>{language === 'ar' ? 'تعديل الطلب' : 'Edit Order'}</span>
+                                                    </button>
+                                                  )}
                                                   {order.status === 'under_review' && (
                                                     <button
                                                       onClick={() => {
@@ -2056,18 +2569,41 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                               </>
                                             )}
                                           </div>
-                                          
-                                          <div className={`flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-black/40 border border-primary/20 ${statusInfo.color}`}>
-                                            <StatusIcon className="w-3.5 h-3.5" />
-                                            <span className="font-bold text-[9px] whitespace-nowrap uppercase tracking-wider">{statusInfo.text}</span>
+
+                                          <div className={`flex items-center gap-2 px-3 py-1 rounded-full border ${statusInfo.bg} ${statusInfo.border} ${statusInfo.color}`}>
+                                            <span className="font-bold text-[11px] whitespace-nowrap">{statusInfo.text}</span>
+                                            <StatusIcon className="w-4 h-4" />
                                           </div>
+                                          {(() => {
+                                            const pickupTimer = getPickupTimerMeta(order);
+                                            if (!pickupTimer) return null;
+                                            const formattedDeadline = (pickupTimer as any).deadlineRaw ? formatDeadline((pickupTimer as any).deadlineRaw as string, language) : '';
+                                            return (
+                                              <div className="flex flex-col items-end gap-1">
+                                                <div className={`text-[11px] font-black px-2 py-0.5 rounded-lg bg-black/35 border border-white/10 ${pickupTimer.className} min-w-[75px] text-center relative`}>
+                                                  {pickupTimer.text}
+                                                  {order.pickup_deadline_updated_at && (
+                                                    <span className="absolute -top-1 -right-1 w-2 h-2 bg-blue-500 rounded-full animate-pulse shadow-[0_0_5px_rgba(59,130,246,0.8)]" title={language === 'ar' ? 'تم تحديث الموعد' : 'Time updated'}></span>
+                                                  )}
+                                                </div>
+                                                <div className="h-3 flex items-center justify-end">
+                                                  {formattedDeadline && (
+                                                    <span className="text-[10px] text-muted font-bold text-right leading-none flex items-center gap-1">
+                                                      {/* Updated label removed as per user request */}
+                                                      {formattedDeadline}
+                                                    </span>
+                                                  )}
+                                                </div>
+                                              </div>
+                                            );
+                                          })()}
                                         </div>
                                       </div>
 
                                       <div
                                         className="flex-1"
                                       >
-                                        <div 
+                                        <div
                                           className="flex items-baseline justify-between text-xs text-gray-400 mb-4 border-b border-primary/10 pb-3 cursor-pointer"
                                           onClick={() => setExpandedOrderId(isExpanded ? null : order.id)}
                                         >
@@ -2086,7 +2622,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                         </div>
 
                                         <div className="text-center mb-2">
-                                          <button 
+                                          <button
                                             onClick={() => setExpandedOrderId(isExpanded ? null : order.id)}
                                             className="w-full text-primary text-xs font-bold py-2 rounded-xl bg-primary/5 border border-primary/20 hover:bg-primary/10 transition-all"
                                           >
@@ -2097,7 +2633,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                         </div>
 
                                         {/* Expanded Content */}
-                                        <div className={`overflow-hidden ease-in-out ${isDetailsOpen ? 'transition-all duration-500 max-h-[1000px] opacity-100 mt-4' : 'max-h-0 opacity-0 transition-none'}`}>
+                                        <div className={`overflow-hidden transition-all duration-500 ease-in-out ${isDetailsOpen ? 'max-h-[1000px] opacity-100 mt-4' : 'max-h-0 opacity-0 mt-0 pointer-events-none'}`}>
                                           <div className="space-y-4">
                                             {/* Cancellation Reason UI */}
                                             {isCancelling && (
@@ -2244,6 +2780,53 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                             )}
                           </div>
 
+                          {/* Update Pickup Time Picker */}
+                          {(() => {
+                            const order = orders.find(o => o.id === showUpdateTimePicker);
+                            if (!order) return null;
+                            const d = order.pickup_deadline_at ? new Date(order.pickup_deadline_at) : new Date();
+                            let h = d.getHours();
+                            const ampm = h >= 12 ? 'PM' : 'AM';
+                            h = h % 12 || 12;
+                            return (
+                              <TimePicker
+                                isOpen={!!showUpdateTimePicker}
+                                onClose={() => setShowUpdateTimePicker(null)}
+                                language={language}
+                                initialHour={h}
+                                initialMinute={d.getMinutes()}
+                                initialAmPm={ampm}
+                                onConfirm={async (h2, m2, ampm2) => {
+                                  let finalH = h2 % 12;
+                                  if (ampm2 === 'PM') finalH += 12;
+                                  const newDate = new Date(); // Base on 'now' to allow moving between Today/Tomorrow correctly
+                                  newDate.setHours(finalH, m2, 0, 0);
+
+                                  // If new date is in the past, assume tomorrow
+                                  const nowComp = new Date(); nowComp.setSeconds(0, 0); if (newDate.getTime() < nowComp.getTime()) {
+                                    newDate.setDate(newDate.getDate() + 1);
+                                  }
+
+                                  const { error } = await supabase
+                                    .from('orders')
+                                    .update({
+                                      delivery_method: 'pickup',
+                                      pickup_deadline_at: newDate.toISOString(),
+                                      pickup_deadline_updated_at: new Date().toISOString(),
+                                      pickup_deadline_operator_seen: false,
+                                      updated_at: new Date().toISOString()
+                                    })
+                                    .eq('id', order.id);
+
+                                  if (!error) {
+                                    setShowUpdateTimePicker(null);
+                                    fetchOrders();
+                                  }
+                                }}
+                              />
+                            );
+                          })()}
+
                           {/* Past Orders List */}
                           <div className="space-y-4">
                             <h4 className="text-white font-bold text-right text-lg border-t border-primary/20 pt-6">
@@ -2256,7 +2839,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                               </div>
                             ) : (
                               pastOrders.map(order => {
-                                const statusInfo = getStatusInfo(order.status);
+                                const statusInfo = getStatusInfo(order.status, order.delivery_method);
                                 const StatusIcon = statusInfo.icon;
 
                                 return (
@@ -2287,9 +2870,9 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                         </p>
                                       </div>
 
-                                      <div className={`flex items-center gap-2 ${statusInfo.color}`}>
-                                        <span className="font-bold">{statusInfo.text}</span>
-                                        <StatusIcon className="w-6 h-6" />
+                                      <div className={`flex items-center gap-2 px-3 py-1 rounded-full border ${statusInfo.bg} ${statusInfo.border} ${statusInfo.color}`}>
+                                        <span className="font-bold text-sm">{statusInfo.text}</span>
+                                        <StatusIcon className="w-5 h-5" />
                                       </div>
                                     </div>
 
@@ -2511,94 +3094,49 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                               })
                             )}
                           </div>
+
+
                         </>
                       );
                     })()}
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         </div>
-        {!phoneChrome && desktopAddressMapOverlayOpen && (
-          <div className="absolute inset-0 z-[95] rounded-[1.85rem] border-2 border-primary/45 bg-dark/95 p-3 profile-mobile-push">
-          <div className="mb-2 flex items-center justify-between">
-            <button
-              type="button"
-              onClick={() => setDesktopAddressMapOverlayOpen(false)}
-              className="inline-flex items-center gap-1 rounded-lg border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-black text-white"
-            >
-              <ChevronRight className="h-3.5 w-3.5" />
-              {language === 'ar' ? 'رجوع' : 'Back'}
-            </button>
-            <button
-              type="button"
-              onClick={() => setDesktopAddressMapOverlayOpen(false)}
-              className="rounded-lg bg-primary px-3 py-1.5 text-xs font-black text-white"
-            >
-              {language === 'ar' ? 'تأكيد الموقع' : 'Confirm Location'}
-            </button>
-          </div>
-          <InteractiveMap
-            latitude={typeof mapLat === 'number' ? mapLat : 30.0444}
-            longitude={typeof mapLng === 'number' ? mapLng : 31.2357}
-            onLocationChange={(lat, lng) => setProfileDraft((p) => ({ ...p, latitude: lat, longitude: lng }))}
-            onAddressChange={(address) =>
-              setProfileDraft((p) => ({
-                ...p,
-                street: address.street || p.street,
-                area: address.area || p.area,
-                city: address.city || p.city,
-                building_number: address.buildingNumber || p.building_number
-              }))
-            }
-            isEditing={true}
-            className="h-[calc(100%-40px)]"
-            containerHeight="100%"
+        {settingsView === 'map' && (
+          <MobileMapEditor
+            initialLatitude={profileDraft.latitude || 30.0444}
+            initialLongitude={profileDraft.longitude || 31.2357}
+            zones={deliveryZones}
+            services={deliveryServices}
+            onConfirm={(data) => {
+              const updatedData = {
+                latitude: data.latitude,
+                longitude: data.longitude,
+                city: data.city,
+                area: data.area,
+                street: data.street,
+                building_number: data.buildingNumber
+              };
+              // Map confirmed — update draft only; DB write happens on main "Save" button press
+              setProfileDraft(p => ({ ...p, ...updatedData }));
+              setSettingsView('addresses');
+            }}
+            onCancel={() => {
+              if (locationBackupRef.current) {
+                setProfileDraft(p => ({
+                  ...p,
+                  ...locationBackupRef.current
+                }));
+              }
+              setSettingsView('addresses');
+            }}
           />
-          </div>
         )}
       </div>
-      {phoneChrome && mobileProfileTabSheet && mobileProfileTabMenuPos && (
-        <>
-          <div className="fixed inset-0 z-[120]" onClick={() => setMobileProfileTabSheet(null)} />
-          <div
-            className="fixed z-[130] rounded-lg border border-primary/50 bg-[hsl(var(--color-surface))] shadow-xl flex overflow-hidden animate-in fade-in zoom-in-95 duration-150"
-            style={{
-              top: mobileProfileTabMenuPos.top,
-              left: mobileProfileTabMenuPos.left,
-              width: mobileProfileTabMenuPos.width,
-              transform: 'translateX(-50%)'
-            }}
-          >
-            <button
-              type="button"
-              onClick={(e) => {
-                e.preventDefault(); e.stopPropagation();
-                setShowProfileCustomAddressInput(false);
-                setRenameProfileTabTarget(mobileProfileTabSheet);
-                setRenameProfileTabInput(mobileProfileTabSheet.label);
-                setMobileProfileTabSheet(null);
-                setMobileProfileTabMenuPos(null);
-              }}
-              className="flex-1 py-3 flex items-center justify-center text-primary hover:bg-primary/15 transition-colors"
-            >
-              <Edit2 className="w-5 h-5" />
-            </button>
-            <div className="w-px bg-primary/25 self-stretch my-1" />
-            <button
-              type="button"
-              onClick={(e) => {
-                e.preventDefault(); e.stopPropagation();
-                removeProfileAddressTab(mobileProfileTabSheet);
-              }}
-              className="flex-1 py-3 flex items-center justify-center text-red-300 hover:bg-red-500/15 transition-colors"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
-        </>
-      )}
+
       <style>{`
         .profile-dropdown-desktop {
           animation: profileDockSheet 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
@@ -2686,6 +3224,605 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
           }
         }
       `}</style>
+
+      {typeof document !== 'undefined' &&
+        showProfileCustomAddressInput &&
+        addressNamePopoverPos &&
+        createPortal(
+          <AddressNamePopover
+            mode="create"
+            language={language}
+            value={newProfileAddressName}
+            onChange={setNewProfileAddressName}
+            onSave={() => void addProfileCustomAddressTab()}
+            onCancel={() => {
+              setShowProfileCustomAddressInput(false);
+              setPendingProfileAddressType(null);
+              setNewProfileAddressName('');
+              setAddressNamePopoverPos(null);
+            }}
+            position={addressNamePopoverPos}
+          />,
+          document.body
+        )}
+
+      {/* Logout confirmation dialog */}
+      {logoutConfirm && (
+        <div
+          className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          onClick={() => setLogoutConfirm(null)}
+        >
+          <div
+            className="w-[90vw] max-w-sm rounded-2xl border border-primary/40 bg-[hsl(var(--color-surface))] p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-red-500/15 border border-red-500/25">
+                <LogOut className="w-5 h-5 text-red-400" />
+              </div>
+              <h4 className="text-base font-black text-white">
+                {language === 'ar' ? 'تسجيل الخروج' : 'Logout'}
+              </h4>
+            </div>
+
+            <p className="text-sm text-muted text-right leading-relaxed mb-2">
+              {language === 'ar'
+                ? 'هل أنت متأكد من تسجيل الخروج من هذا الحساب؟'
+                : 'Are you sure you want to logout from this account?'}
+            </p>
+
+            <div className="rounded-xl border border-primary/25 bg-primary/5 p-3 text-right mb-5">
+              <p className="text-sm font-bold text-white">{logoutConfirm.name || (language === 'ar' ? 'بدون اسم' : 'No Name')}</p>
+              <p className="text-xs text-muted mt-0.5" dir="ltr">{logoutConfirm.phone}</p>
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setLogoutConfirm(null)}
+                className="flex-1 rounded-xl border border-white/20 bg-white/5 py-2.5 text-sm font-black text-white transition-colors hover:bg-white/10"
+              >
+                {language === 'ar' ? 'إلغاء' : 'Cancel'}
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const phoneToLogout = logoutConfirm.phone;
+                  setLogoutConfirm(null);
+                  try {
+                    // Remove device_fingerprint from this customer so they're no longer "saved" on this device
+                    const fp = getOrCreateDeviceFingerprint();
+                    await supabase
+                      .from('customers')
+                      .update({ device_fingerprint: null } as any)
+                      .eq('phone', phoneToLogout)
+                      .eq('device_fingerprint', fp);
+
+                    // Clear trusted hash
+                    localStorage.removeItem(trustedPhoneKey(phoneToLogout));
+
+                    // If this was the active account, clear it
+                    const currentPhone = localStorage.getItem('customer_phone');
+                    if (currentPhone === phoneToLogout) {
+                      localStorage.removeItem('customer_phone');
+                      setProfileCustomer(null);
+                      setProfileCustomerId(null);
+                      setProfileDraft(prev => ({ ...prev, name: '', phone: '' }));
+                      if (onPhoneValidated) await onPhoneValidated('');
+                    }
+
+                    // Refresh the saved accounts list
+                    await fetchSavedAccounts();
+                    if (settingsView !== 'switch_accounts') {
+                      setSettingsView('main');
+                    }
+                  } catch (err) {
+                    console.error('Logout error:', err);
+                  }
+                }}
+                className="flex-1 rounded-xl bg-red-500 py-2.5 text-sm font-black text-white transition-colors hover:bg-red-600"
+              >
+                {language === 'ar' ? 'موافق' : 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+
+    </div>
+  );
+}
+
+/** Helpers for account management */
+
+const filterDigits = (val: string) => val.replace(/\D/g, '');
+const trustedPhoneKey = (phone: string) => `trusted_phone_auth:${phone}`;
+
+interface AddAccountBlockProps {
+  language: 'ar' | 'en';
+  phoneChrome: boolean;
+  onBack: () => void;
+  onSuccess: (phone: string) => void | Promise<void>;
+}
+
+type AddAccountStep = 'phone' | 'password' | 'name';
+
+function AddAccountBlock({ language, phoneChrome, onBack, onSuccess }: AddAccountBlockProps) {
+  const [step, setStep] = useState<AddAccountStep>('phone');
+  const [name, setName] = useState('');
+  const [phone, setPhone] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [forgotMode, setForgotMode] = useState(false);
+  const [recoveryCodeInput, setRecoveryCodeInput] = useState('');
+  const [resetPwd1, setResetPwd1] = useState('');
+  const [resetPwd2, setResetPwd2] = useState('');
+  const [resetErr, setResetErr] = useState<string | null>(null);
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetNewRecovery, setResetNewRecovery] = useState<string | null>(null);
+  const [existingRow, setExistingRow] = useState<{
+    id: string;
+    phone_password_hash: string | null;
+    phone_password_owner_fingerprint: string | null;
+    name?: string | null;
+  } | null>(null);
+
+  const handlePhoneSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanPhone = filterDigits(phone);
+    if (cleanPhone.length > 15) {
+      setError(language === 'ar' ? 'رقم الهاتف يجب ألا يتجاوز 15 رقم' : 'Phone number must not exceed 15 digits');
+      return;
+    }
+    if (cleanPhone.length < 10) {
+      setError(language === 'ar' ? 'أدخل رقم هاتف صحيح (10 أرقام على الأقل)' : 'Enter a valid phone number (at least 10 digits)');
+      return;
+    }
+
+    setError(null);
+    setLoading(true);
+
+    try {
+      const currentActivePhone = filterDigits(localStorage.getItem('customer_phone') || '');
+      if (currentActivePhone && cleanPhone === currentActivePhone) {
+        // Same active phone should refresh/select the account instead of hard-failing.
+        await onSuccess(cleanPhone);
+        setLoading(false);
+        return;
+      }
+      const existing = await findCustomerAuthByPhone(cleanPhone);
+
+      if (existing) {
+        setExistingRow(existing);
+        const fp = getOrCreateDeviceFingerprint();
+        const ownerFp = (existing as any)?.phone_password_owner_fingerprint as string | null | undefined;
+        const hasPwd = !!existing.phone_password_hash;
+        const requireByDevice = hasPwd && (!ownerFp || ownerFp.trim() === '' || ownerFp !== fp);
+        const trustedHash = hasPwd ? localStorage.getItem(trustedPhoneKey(cleanPhone)) : null;
+        const trustedOnThisDevice = hasPwd && trustedHash && trustedHash === existing.phone_password_hash;
+        const requirePwd = requireByDevice && !trustedOnThisDevice;
+
+        if (requirePwd) {
+          // Existing customer WITH password → show password step
+          setStep('password');
+        } else {
+          // Existing customer WITHOUT password (or trusted device) → link this device and login directly
+          const customerUpdatePayload = {
+            device_fingerprint: fp,
+            updated_at: new Date().toISOString()
+          };
+          await supabase.from('customers').update(customerUpdatePayload).eq('id', existing.id);
+          await onSuccess(cleanPhone);
+        }
+      } else {
+        // New customer → show name step
+        setExistingRow(null);
+        setStep('name');
+      }
+    } catch (err) {
+      console.error('Phone lookup error:', err);
+      setError(language === 'ar' ? 'حدث خطأ. حاول مرة أخرى.' : 'An error occurred. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handlePasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!password.trim()) {
+      setError(language === 'ar' ? 'أدخل كلمة المرور' : 'Enter the password');
+      return;
+    }
+
+    setError(null);
+    setLoading(true);
+    const cleanPhone = filterDigits(phone);
+
+    try {
+      const hash = await hashPhonePassword(cleanPhone, password);
+      if (hash !== existingRow?.phone_password_hash) {
+        setError(language === 'ar' ? 'كلمة المرور غير صحيحة.' : 'Incorrect password.');
+        setLoading(false);
+        return;
+      }
+      // Remember this device for this phone until password changes
+      if (existingRow?.phone_password_hash) {
+        localStorage.setItem(trustedPhoneKey(cleanPhone), existingRow.phone_password_hash);
+      }
+      // Password correct — login
+      const fp = getOrCreateDeviceFingerprint();
+      await supabase.from('customers').update({
+        device_fingerprint: fp,
+        updated_at: new Date().toISOString()
+      }).eq('id', existingRow!.id);
+      await onSuccess(cleanPhone);
+    } catch (err) {
+      console.error('Password verify error:', err);
+      setError(language === 'ar' ? 'حدث خطأ أثناء التحقق.' : 'Verification failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleNameSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) {
+      setError(language === 'ar' ? 'أدخل اسمك' : 'Enter your name');
+      return;
+    }
+
+    setError(null);
+    setLoading(true);
+    const cleanPhone = filterDigits(phone);
+    if (cleanPhone.length > 15) {
+      setError(language === 'ar' ? 'رقم الهاتف يجب ألا يتجاوز 15 رقم' : 'Phone number must not exceed 15 digits');
+      setLoading(false);
+      return;
+    }
+    if (cleanPhone.length < 10) {
+      setError(language === 'ar' ? 'أدخل رقم هاتف صحيح (10 أرقام على الأقل)' : 'Enter a valid phone number (at least 10 digits)');
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const fp = getOrCreateDeviceFingerprint();
+      await ensureCustomerByPhone(cleanPhone, {
+        name: name.trim(),
+        device_fingerprint: fp
+      });
+      await onSuccess(cleanPhone);
+    } catch (err) {
+      console.error('Create account error:', err);
+      setError(language === 'ar' ? 'حدث خطأ أثناء إنشاء الحساب.' : 'Failed to create account.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleStepBack = () => {
+    if (step === 'phone') {
+      onBack();
+    } else {
+      setStep('phone');
+      setPassword('');
+      setForgotMode(false);
+      setRecoveryCodeInput('');
+      setResetPwd1('');
+      setResetPwd2('');
+      setResetErr(null);
+      setResetNewRecovery(null);
+      setName('');
+      setError(null);
+      setExistingRow(null);
+    }
+  };
+
+  const stepTitle = step === 'phone'
+    ? (language === 'ar' ? 'إضافة حساب' : 'Add Account')
+    : step === 'password'
+      ? (language === 'ar' ? 'تسجيل الدخول' : 'Sign In')
+      : (language === 'ar' ? 'حساب جديد' : 'New Account');
+
+  const stepSubtitle = step === 'phone'
+    ? (language === 'ar' ? 'أدخل رقم الهاتف للمتابعة' : 'Enter your phone number to continue')
+    : step === 'password'
+      ? (language === 'ar' ? 'هذا الرقم محمي بكلمة مرور' : 'This number is password-protected')
+      : (language === 'ar' ? 'أدخل اسمك لإنشاء حساب جديد' : 'Enter your name to create a new account');
+
+  return (
+    <div className={`space-y-4 ${phoneChrome ? 'profile-mobile-push' : ''}`}>
+      <button
+        type="button"
+        onClick={handleStepBack}
+        className="inline-flex items-center gap-1 rounded-lg border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-black text-white"
+      >
+        <ChevronRight className="h-3.5 w-3.5" />
+        {language === 'ar' ? 'رجوع' : 'Back'}
+      </button>
+
+      <div className="text-right">
+        <h4 className="text-sm font-black text-white">{stepTitle}</h4>
+        <p className="text-xs text-muted mt-0.5">{stepSubtitle}</p>
+      </div>
+
+      {/* Step 1: Phone number */}
+      {step === 'phone' && (
+        <form onSubmit={handlePhoneSubmit} className="space-y-4">
+          <div>
+            <label className="mb-1 block text-right text-xs text-muted">
+              {language === 'ar' ? 'رقم الهاتف' : 'Phone Number'}
+            </label>
+            <input
+              required
+              type="tel"
+              autoFocus
+              value={phone}
+              maxLength={15}
+              onChange={e => {
+                const next = filterDigits(e.target.value).slice(0, 15);
+                setPhone(next);
+                if (error) setError(null);
+              }}
+              placeholder="01xxxxxxxxx"
+              className="w-full rounded-xl border border-primary/35 bg-dark px-4 py-3 text-right text-sm text-white focus:border-primary/60 outline-none"
+              dir="ltr"
+            />
+          </div>
+
+          {error && (
+            <div className="flex items-center gap-2 rounded-lg bg-red-500/10 p-3 text-right text-xs text-red-500 border border-red-500/20">
+              <AlertTriangle className="h-4 w-4 shrink-0" />
+              <p className="flex-1">{error}</p>
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={loading || filterDigits(phone).length < 10}
+            className="w-full h-12 rounded-xl bg-primary text-white font-black text-sm transition-all hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-primary/20 flex items-center justify-center gap-2"
+          >
+            {loading ? (
+              <div className="h-5 w-5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+            ) : (
+              language === 'ar' ? 'التالي' : 'Next'
+            )}
+          </button>
+        </form>
+      )}
+
+      {/* Step 2a: Password for existing protected account */}
+      {step === 'password' && (
+        <form onSubmit={handlePasswordSubmit} className="space-y-4">
+          <div className="rounded-xl border border-primary/25 bg-primary/5 p-3 text-right">
+            <p className="text-xs text-muted">{language === 'ar' ? 'رقم الهاتف' : 'Phone Number'}</p>
+            <p className="text-sm font-bold text-white mt-0.5" dir="ltr">{filterDigits(phone)}</p>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-right text-xs text-muted">
+              {language === 'ar' ? 'كلمة المرور' : 'Password'}
+            </label>
+            <div className="relative">
+              <input
+                required
+                type="password"
+                autoFocus
+                value={password}
+                onChange={e => { setPassword(e.target.value); setError(null); }}
+                placeholder="••••••••"
+                className="w-full rounded-xl border border-primary/35 bg-dark px-4 py-3 text-right text-sm text-white focus:border-primary/60 outline-none"
+              />
+              <Lock className="absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-muted" />
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setForgotMode((v) => !v);
+              setResetErr(null);
+              setResetNewRecovery(null);
+              setError(null);
+            }}
+            className="text-[11px] font-black text-amber-200/90 hover:text-amber-200 underline text-right w-full"
+          >
+            {language === 'ar' ? 'هل نسيت كلمة المرور؟' : 'Forgot password?'}
+          </button>
+
+          {forgotMode && (
+            <div className="rounded-lg border border-amber-500/30 bg-black/20 p-2 space-y-2">
+              <p className="text-[11px] text-amber-100/85 text-right leading-relaxed">
+                {language === 'ar'
+                  ? 'أدخل كود الاسترجاع الذي حصلت عليه عند إنشاء كلمة المرور، ثم عيّن كلمة مرور جديدة.'
+                  : 'Enter your numeric recovery code, then set a new password.'}
+              </p>
+              <input
+                type="tel"
+                value={recoveryCodeInput}
+                onChange={(e) => {
+                  setRecoveryCodeInput(filterDigits(e.target.value).slice(0, 6));
+                  setResetErr(null);
+                }}
+                className="w-full bg-dark border border-amber-500/35 rounded-lg px-3 py-2 text-white text-right text-sm font-black"
+                placeholder={language === 'ar' ? 'كود الاسترجاع (6 أرقام)' : 'Recovery code (6 digits)'}
+                dir="ltr"
+              />
+              <div className="grid grid-cols-1 gap-2">
+                <input
+                  type="password"
+                  value={resetPwd1}
+                  onChange={(e) => {
+                    setResetPwd1(e.target.value);
+                    setResetErr(null);
+                  }}
+                  className="w-full bg-dark border border-amber-500/35 rounded-lg px-3 py-2 text-white text-right text-sm"
+                  placeholder={language === 'ar' ? 'كلمة مرور جديدة' : 'New password'}
+                  dir="ltr"
+                />
+                <input
+                  type="password"
+                  value={resetPwd2}
+                  onChange={(e) => {
+                    setResetPwd2(e.target.value);
+                    setResetErr(null);
+                  }}
+                  className="w-full bg-dark border border-amber-500/35 rounded-lg px-3 py-2 text-white text-right text-sm"
+                  placeholder={language === 'ar' ? 'تأكيد كلمة المرور' : 'Confirm password'}
+                  dir="ltr"
+                />
+              </div>
+              {resetErr && <p className="text-red-400 text-[11px] font-black text-right">{resetErr}</p>}
+              {resetNewRecovery && (
+                <div className="rounded-lg border border-amber-500/35 bg-black/25 p-2 text-center">
+                  <p className="text-[11px] text-amber-100/85 mb-1">
+                    {language === 'ar' ? 'كود استرجاع جديد (احتفظ به):' : 'New recovery code (keep it):'}
+                  </p>
+                  <p className="font-mono text-lg font-black text-amber-200 tracking-widest">{resetNewRecovery}</p>
+                </div>
+              )}
+              <button
+                type="button"
+                disabled={resetBusy}
+                onClick={async () => {
+                  const cleanPhone = filterDigits(phone || '');
+                  if (recoveryCodeInput.length !== 6) {
+                    setResetErr(language === 'ar' ? 'أدخل كود استرجاع صحيح (6 أرقام).' : 'Enter a 6-digit recovery code.');
+                    return;
+                  }
+                  if (resetPwd1.length < 4) {
+                    setResetErr(language === 'ar' ? 'كلمة المرور 4 أحرف على الأقل.' : 'Password must be at least 4 characters.');
+                    return;
+                  }
+                  if (resetPwd1 !== resetPwd2) {
+                    setResetErr(language === 'ar' ? 'تأكيد كلمة المرور غير مطابق.' : 'Passwords do not match.');
+                    return;
+                  }
+                  setResetBusy(true);
+                  try {
+                    const { data: row } = await supabase
+                      .from('customers')
+                      .select('id, phone_recovery_code_hash, phone_password_hash')
+                      .eq('phone', cleanPhone)
+                      .maybeSingle();
+                    const expected = (row as any)?.phone_recovery_code_hash as string | null | undefined;
+                    if (!row?.id || !expected) {
+                      setResetErr(language === 'ar' ? 'لا يوجد كود استرجاع لهذا الرقم.' : 'No recovery code for this number.');
+                      return;
+                    }
+                    const h = await hashRecoveryCode(cleanPhone, recoveryCodeInput);
+                    if (h !== expected) {
+                      setResetErr(language === 'ar' ? 'كود الاسترجاع غير صحيح.' : 'Invalid recovery code.');
+                      return;
+                    }
+                    const fp = getOrCreateDeviceFingerprint();
+                    const newPwdHash = await hashPhonePassword(cleanPhone, resetPwd1);
+                    const oldPwdHash = (row as any)?.phone_password_hash as string | null | undefined;
+                    if (oldPwdHash && newPwdHash === oldPwdHash) {
+                      setResetErr(language === 'ar' ? 'لا يمكن اختيار نفس كلمة المرور السابقة.' : 'You cannot reuse the previous password.');
+                      return;
+                    }
+                    const newRecovery = generateEasyRecoveryCode();
+                    const newRecoveryHash = await hashRecoveryCode(cleanPhone, newRecovery);
+                    const { error: updateErr } = await supabase
+                      .from('customers')
+                      .update({
+                        phone_password_hash: newPwdHash,
+                        phone_recovery_code_hash: newRecoveryHash,
+                        phone_password_owner_fingerprint: fp,
+                        updated_at: new Date().toISOString()
+                      })
+                      .eq('id', row.id);
+                    if (updateErr) throw updateErr;
+                    setExistingRow((prev) => (prev ? { ...prev, phone_password_hash: newPwdHash } : prev));
+                    setPassword('');
+                    setError(null);
+                    setResetNewRecovery(newRecovery);
+                    setResetErr(null);
+                  } catch (err) {
+                    console.error(err);
+                    setResetErr(language === 'ar' ? 'تعذر إعادة تعيين كلمة المرور.' : 'Could not reset password.');
+                  } finally {
+                    setResetBusy(false);
+                  }
+                }}
+                className="w-full bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white py-2 rounded-lg font-black text-xs"
+              >
+                {resetBusy
+                  ? language === 'ar'
+                    ? 'جاري التحقق…'
+                    : 'Verifying…'
+                  : language === 'ar'
+                    ? 'تأكيد الكود وتغيير كلمة المرور'
+                    : 'Verify & change password'}
+              </button>
+            </div>
+          )}
+
+          {error && (
+            <div className="flex items-center gap-2 rounded-lg bg-red-500/10 p-3 text-right text-xs text-red-500 border border-red-500/20">
+              <AlertTriangle className="h-4 w-4 shrink-0" />
+              <p className="flex-1">{error}</p>
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full h-12 rounded-xl bg-primary text-white font-black text-sm transition-all hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-primary/20 flex items-center justify-center gap-2"
+          >
+            {loading ? (
+              <div className="h-5 w-5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+            ) : (
+              language === 'ar' ? 'تسجيل الدخول' : 'Sign In'
+            )}
+          </button>
+        </form>
+      )}
+
+      {/* Step 2b: Name for new customer */}
+      {step === 'name' && (
+        <form onSubmit={handleNameSubmit} className="space-y-4">
+          <div className="rounded-xl border border-primary/25 bg-primary/5 p-3 text-right">
+            <p className="text-xs text-muted">{language === 'ar' ? 'رقم الهاتف' : 'Phone Number'}</p>
+            <p className="text-sm font-bold text-white mt-0.5" dir="ltr">{filterDigits(phone)}</p>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-right text-xs text-muted">
+              {language === 'ar' ? 'الاسم' : 'Name'}
+            </label>
+            <input
+              required
+              autoFocus
+              value={name}
+              onChange={e => { setName(e.target.value); setError(null); }}
+              placeholder={language === 'ar' ? 'أدخل اسمك' : 'Enter your name'}
+              className="w-full rounded-xl border border-primary/35 bg-dark px-4 py-3 text-right text-sm text-white focus:border-primary/60 outline-none"
+            />
+          </div>
+
+          {error && (
+            <div className="flex items-center gap-2 rounded-lg bg-red-500/10 p-3 text-right text-xs text-red-500 border border-red-500/20">
+              <AlertTriangle className="h-4 w-4 shrink-0" />
+              <p className="flex-1">{error}</p>
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full h-12 rounded-xl bg-primary text-white font-black text-sm transition-all hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-primary/20 flex items-center justify-center gap-2"
+          >
+            {loading ? (
+              <div className="h-5 w-5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+            ) : (
+              language === 'ar' ? 'إنشاء الحساب' : 'Create Account'
+            )}
+          </button>
+        </form>
+      )}
     </div>
   );
 }

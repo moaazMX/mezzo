@@ -16,6 +16,7 @@ import {
   BarChart3
 } from 'lucide-react';
 import { supabase, Customer, Order, DeviceCoupon, CustomerGeneralNote } from '../../lib/supabase';
+import { useRealtimeRefetch } from '../../hooks/useRealtimeSubscription';
 import CustomerMiniMap from './CustomerMiniMap';
 import { generateEasyRecoveryCode, hashPhonePassword, hashRecoveryCode } from '../../lib/phonePassword';
 import { getOrCreateDeviceFingerprint } from '../../lib/deviceFingerprint';
@@ -296,8 +297,8 @@ export default function OperatorCustomerSearch({
       const { data, error } = await supabase
         .from('customers')
         .select('*')
-        .order('created_at', { ascending: false })
-        .limit(1200);
+        .order('updated_at', { ascending: false })
+        .limit(5000);
       if (error) {
         console.error('load customers:', error);
         setOrderedCustomers([]);
@@ -312,6 +313,19 @@ export default function OperatorCustomerSearch({
   useEffect(() => {
     void loadOrderedCustomers();
   }, [loadOrderedCustomers]);
+
+  useRealtimeRefetch('operator-customers', ['customers'], () => {
+    void loadOrderedCustomers();
+  });
+
+  useRealtimeRefetch(
+    'operator-customer-panel',
+    ['orders', 'archive_orders', 'device_coupons', 'customer_general_notes', 'order_items'],
+    () => {
+      if (panel?.customer) void refreshPanelData(panel.customer);
+    },
+    { enabled: !!panel?.customer }
+  );
 
   useEffect(() => {
     const ids = orderedCustomers.map((c) => c.id);
@@ -1026,26 +1040,23 @@ export default function OperatorCustomerSearch({
                 const s = summaries[c.id];
                 const lines = receiptAddressLines(c);
                 return (
-                  <button
+                  <div
                     key={c.id}
-                    type="button"
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') void openPanel(c); }}
                     onClick={() => void openPanel(c)}
-                    className={`text-right rounded-2xl border-2 border-cyan-500/45 bg-gradient-to-b from-gray-950 to-gray-900/95 p-4 hover:border-cyan-400 hover:shadow-[0_0_20px_rgba(34,211,238,0.12)] transition-all min-h-[220px] flex flex-col gap-3 ${
+                    className={`text-right rounded-2xl border-2 border-cyan-500/45 bg-gradient-to-b from-gray-950 to-gray-900/95 p-4 hover:border-cyan-400 hover:shadow-[0_0_20px_rgba(34,211,238,0.12)] transition-all min-h-[220px] flex flex-col gap-3 cursor-pointer select-none ${
                       highlightCustomerId === c.id ? 'ring-2 ring-amber-400 animate-pulse' : ''
                     }`}
                   >
                     <div className="flex items-start justify-between gap-2 border-b border-cyan-500/20 pb-2">
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void openPanel(c);
-                        }}
-                        className="w-5 h-5 rounded-full border border-cyan-500/35 text-cyan-300 text-[11px] font-black leading-none flex items-center justify-center opacity-70 hover:opacity-100"
+                      <div
+                        className="w-5 h-5 rounded-full border border-cyan-500/35 text-cyan-300 text-[11px] font-black leading-none flex items-center justify-center opacity-70"
                         title="تفاصيل"
                       >
                         <Plus className="w-3 h-3" />
-                      </button>
+                      </div>
                       <span className="text-white font-black text-base leading-snug flex-1">{c.name}</span>
                     </div>
 
@@ -1083,7 +1094,7 @@ export default function OperatorCustomerSearch({
                         </span>
                       </div>
                     )}
-                  </button>
+                  </div>
                 );
               })}
               </div>

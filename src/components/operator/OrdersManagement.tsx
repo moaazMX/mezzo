@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, forwardRef, useImperativeHandle, useCallback, useMemo } from 'react';
 import { supabase, Order, OrderItem, Customer, CustomerNote } from '../../lib/supabase';
-import { Clock, Package, Truck, CheckCircle, XCircle, AlertTriangle, StickyNote, User, Phone, MapPin, Archive, Edit2, X, Navigation, TicketPercent, List } from 'lucide-react';
+import { useRealtimeSubscription } from '../../hooks/useRealtimeSubscription';
+import { Clock, Package, Truck, CheckCircle, XCircle, AlertTriangle, StickyNote, User, Phone, MapPin, Archive, Edit2, X, Navigation, TicketPercent, List, MessageSquare, ShoppingCart } from 'lucide-react';
 import MapView from '../MapView';
 
 interface OrderWithDetails extends Order {
@@ -76,7 +77,7 @@ export type OrdersManagementHandle = {
   revealOrder: (orderId: string, kind: 'live' | 'archive') => void;
 };
 
-const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never>>(function OrdersManagement(_props, ref) {
+const OrdersManagement = forwardRef<OrdersManagementHandle, {}>(function OrdersManagement(_props, ref) {
   const language = 'ar';
   const [activeOrders, setActiveOrders] = useState<OrderWithDetails[]>([]);
   const [completedOrders, setCompletedOrders] = useState<OrderWithDetails[]>([]);
@@ -100,6 +101,7 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never
   const [showMap, setShowMap] = useState(false);
   const [mapLocation, setMapLocation] = useState<{ latitude: number; longitude: number; name?: string; address?: string } | null>(null);
   const [searchDate, setSearchDate] = useState('');
+  const [pickupNowMs, setPickupNowMs] = useState(() => Date.now());
   const [expandedArchiveGroups, setExpandedArchiveGroups] = useState<Set<string>>(new Set());
   const [pendingArchiveRevealOrderId, setPendingArchiveRevealOrderId] = useState<string | null>(null);
   const datePickerRef = useRef<HTMLInputElement | null>(null);
@@ -113,13 +115,27 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never
     return saved ? new Set(JSON.parse(saved)) : new Set();
   });
 
+  const [readCartUpdates, setReadCartUpdates] = useState<Set<string>>(() => {
+    const saved = localStorage.getItem('op_read_cart_updates');
+    return saved ? new Set(JSON.parse(saved)) : new Set();
+  });
+
   useEffect(() => {
     localStorage.setItem('op_read_orders', JSON.stringify(Array.from(readOrders)));
   }, [readOrders]);
 
   useEffect(() => {
+    const t = window.setInterval(() => setPickupNowMs(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  useEffect(() => {
     localStorage.setItem('op_read_notes', JSON.stringify(Array.from(readNotes)));
   }, [readNotes]);
+
+  useEffect(() => {
+    localStorage.setItem('op_read_cart_updates', JSON.stringify(Array.from(readCartUpdates)));
+  }, [readCartUpdates]);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const orderNotesRef = useRef<Record<string, string>>({});
@@ -158,10 +174,76 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
   const [editedNoteText, setEditedNoteText] = useState('');
   const [customerNoteFlashOrderIds, setCustomerNoteFlashOrderIds] = useState<Set<string>>(() => new Set());
+  const [pickupDeadlineFlashOrderIds, setPickupDeadlineFlashOrderIds] = useState<Set<string>>(() => new Set());
   const [pulseOrderBarId, setPulseOrderBarId] = useState<string | null>(null);
   const [quickCustomerMenuOrderId, setQuickCustomerMenuOrderId] = useState<string | null>(null);
   const [archiveCurrentNames, setArchiveCurrentNames] = useState<Record<string, string>>({});
   const [updatingStatusOrderId, setUpdatingStatusOrderId] = useState<string | null>(null);
+  
+  // Notification states and helpers
+  const [activeDropdown, setActiveDropdown] = useState<'clock' | 'customerNote' | 'operatorNote' | 'cancel' | 'update' | null>(null);
+  const dropdownRef = useRef<HTMLDivElement | null>(null);
+
+  const scrollAndPulseOrder = useCallback((orderId: string) => {
+    setPulseOrderBarId(orderId);
+    const domId = `order-bar-${orderId}`;
+    const tryScroll = (attempt = 0) => {
+      const el = document.getElementById(domId);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
+      }
+      if (attempt < 8) {
+        window.setTimeout(() => tryScroll(attempt + 1), 180);
+      }
+    };
+    window.setTimeout(() => tryScroll(0), 280);
+    window.setTimeout(() => setPulseOrderBarId(null), 2800);
+  }, []);
+
+  const handleOpenOrder = useCallback(async (order: OrderWithDetails) => {
+    setSelectedOrder(order);
+    setReadOrders(prev => {
+      const next = new Set(prev);
+      next.add(order.id);
+      return next;
+    });
+    setReadNotes(prev => {
+      const next = new Set(prev);
+      order.notes.forEach(n => next.add(n.id));
+      if (order.order_note) next.add(`order-note-${order.id}`);
+      return next;
+    });
+
+    if (order.customer_update_flag) {
+      setReadCartUpdates(prev => {
+        const next = new Set(prev);
+        next.add(order.id);
+        return next;
+      });
+    }
+    
+    if (order.customer_update_flag || (order.delivery_method === 'pickup' && order.pickup_deadline_updated_at && !order.pickup_deadline_operator_seen)) {
+      await supabase.from('orders').update({ 
+        customer_update_flag: false,
+        pickup_deadline_operator_seen: true 
+      }).eq('id', order.id);
+    }
+  }, []);
+
+  useEffect(() => {
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setActiveDropdown(null);
+      }
+    };
+    if (activeDropdown) {
+      document.addEventListener('mousedown', handleOutsideClick);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick);
+    };
+  }, [activeDropdown]);
 
   const syncOrderNoteRefs = useCallback((list: OrderWithDetails[]) => {
     list.forEach(o => {
@@ -207,7 +289,6 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never
         if (!prev) return null;
         const refreshed = ordersWithDetails.find(o => o.id === prev.id);
         if (refreshed) {
-          // If modal is open, we mark it and its current notes as read
           setReadOrders(prevSet => new Set(prevSet).add(refreshed.id));
           setReadNotes(prevSet => {
             const next = new Set(prevSet);
@@ -448,6 +529,76 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never
     });
   }, [archiveOrders]);
 
+  const clockNotificationOrders = useMemo(() => {
+    return activeOrders.filter(
+      (o) =>
+        o.delivery_method === 'pickup' &&
+        o.pickup_deadline_updated_at
+    );
+  }, [activeOrders]);
+
+  const clockUnreadCount = useMemo(() => clockNotificationOrders.filter(o => !o.pickup_deadline_operator_seen).length, [clockNotificationOrders]);
+
+  const cancelNotificationOrders = useMemo(() => {
+    return activeOrders.filter((o) => o.status === 'cancellation_pending');
+  }, [activeOrders]);
+
+  const customerNoteNotificationOrders = useMemo(() => {
+    return activeOrders.filter((o) => o.order_note);
+  }, [activeOrders]);
+
+  const customerNoteUnreadCount = useMemo(() => customerNoteNotificationOrders.filter(o => !readNotes.has(`order-note-${o.id}`)).length, [customerNoteNotificationOrders, readNotes]);
+
+  const operatorNoteNotificationOrders = useMemo(() => {
+    return activeOrders.filter((o) => o.notes && o.notes.length > 0);
+  }, [activeOrders]);
+
+  const operatorNoteUnreadCount = useMemo(() => operatorNoteNotificationOrders.filter(o => o.notes.some((n) => !readNotes.has(n.id))).length, [operatorNoteNotificationOrders, readNotes]);
+
+  const customerUpdateNotificationOrders = useMemo(() => {
+    return activeOrders.filter((o) => o.customer_update_flag || readCartUpdates.has(o.id));
+  }, [activeOrders, readCartUpdates]);
+
+  const customerUpdateUnreadCount = useMemo(() => customerUpdateNotificationOrders.filter(o => o.customer_update_flag).length, [customerUpdateNotificationOrders]);
+
+
+  const handleNotificationClick = useCallback(async (type: 'clock' | 'customerNote' | 'operatorNote' | 'cancel' | 'update') => {
+    let list: OrderWithDetails[] = [];
+    if (type === 'clock') list = clockNotificationOrders;
+    if (type === 'customerNote') list = customerNoteNotificationOrders;
+    if (type === 'operatorNote') list = operatorNoteNotificationOrders;
+    if (type === 'cancel') list = cancelNotificationOrders;
+    if (type === 'update') list = customerUpdateNotificationOrders;
+
+    if (list.length === 0) return;
+
+    if (list.length === 1) {
+      const order = list[0];
+      await handleOpenOrder(order);
+      setShowArchive(false);
+      setShowCompleted(false);
+      scrollAndPulseOrder(order.id);
+    } else {
+      setActiveDropdown(prev => prev === type ? null : type);
+    }
+  }, [
+    clockNotificationOrders,
+    customerNoteNotificationOrders,
+    operatorNoteNotificationOrders,
+    cancelNotificationOrders,
+    customerUpdateNotificationOrders,
+    handleOpenOrder,
+    scrollAndPulseOrder
+  ]);
+
+  const handleSelectNotificationOrder = useCallback(async (order: OrderWithDetails) => {
+    setActiveDropdown(null);
+    await handleOpenOrder(order);
+    setShowArchive(false);
+    setShowCompleted(false);
+    scrollAndPulseOrder(order.id);
+  }, [handleOpenOrder, scrollAndPulseOrder]);
+
   const searchOrders = async () => {
     const hasSearch = searchName.trim() || searchPhone.trim() || searchOrderNumber.trim() || searchAddress.trim() || searchDate.trim();
     if (!hasSearch) {
@@ -681,66 +832,87 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never
 
   };
 
-  // Initialize and setup real-time subscriptions
+  // Initial load
   useEffect(() => {
     fetchOrders();
     fetchArchiveOrders();
+  }, []);
 
-    // Real-time subscription for orders
-    const ordersChannel = supabase
-      .channel('orders-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, (payload) => {
-        const { eventType, new: newOrder, old: oldOrder } = payload;
-        
-        // Play sound for:
-        // 1. New orders
-        if (eventType === 'INSERT') {
+  const refreshAllOrdersData = () => {
+    fetchOrders();
+    fetchArchiveOrders();
+  };
+
+  useRealtimeSubscription({
+    channelName: 'orders-realtime',
+    onReconnect: refreshAllOrdersData,
+    subscriptions: [
+      {
+        table: 'orders',
+        onInsert: () => {
           playNotificationSound();
-        }
-        // 2. Cancellation requests
-        else if (eventType === 'UPDATE' && newOrder.status === 'cancellation_pending' && oldOrder.status !== 'cancellation_pending') {
-          playNotificationSound();
-        }
-        // 3. تعديل ملاحظة العميل على الطلب (order_note) — مقارنة بالقيمة المحلية لأن قد لا يأتي السجل القديم كاملاً من Realtime
-        else if (eventType === 'UPDATE' && newOrder && typeof (newOrder as any).id === 'string') {
-          const id = (newOrder as any).id as string;
-          if (Object.prototype.hasOwnProperty.call(newOrder, 'order_note')) {
-            const prev = orderNotesRef.current[id] ?? '';
-            const next = String((newOrder as any).order_note ?? '');
-            if (prev !== next) {
-              orderNotesRef.current[id] = next;
+          fetchOrders();
+        },
+        onUpdate: (payload) => {
+          const newOrder = payload.new as any;
+          const oldOrder = payload.old as any;
+          if (newOrder && typeof newOrder.id === 'string') {
+            const id = newOrder.id as string;
+
+            if (newOrder.status === 'cancellation_pending' && (!oldOrder || oldOrder.status !== 'cancellation_pending')) {
               playNotificationSound();
-              setReadNotes(prevSet => {
-                const n = new Set(prevSet);
-                n.delete(`order-note-${id}`);
-                return n;
-              });
-              setCustomerNoteFlashOrderIds(prev => new Set(prev).add(id));
-              window.setTimeout(() => {
-                setCustomerNoteFlashOrderIds(prev => {
-                  const n = new Set(prev);
-                  n.delete(id);
+            }
+
+            if (Object.prototype.hasOwnProperty.call(newOrder, 'order_note')) {
+              const prev = orderNotesRef.current[id] ?? '';
+              const next = String((newOrder as any).order_note ?? '');
+              if (prev !== next) {
+                orderNotesRef.current[id] = next;
+                playNotificationSound();
+                setReadNotes(prevSet => {
+                  const n = new Set(prevSet);
+                  n.delete(`order-note-${id}`);
                   return n;
                 });
-              }, 4500);
+                setCustomerNoteFlashOrderIds(prev => new Set(prev).add(id));
+                window.setTimeout(() => {
+                  setCustomerNoteFlashOrderIds(prev => {
+                    const n = new Set(prev);
+                    n.delete(id);
+                    return n;
+                  });
+                }, 4500);
+              }
+            }
+
+            if (Object.prototype.hasOwnProperty.call(newOrder, 'pickup_deadline_updated_at')) {
+              if ((newOrder as any).pickup_deadline_updated_at && !(newOrder as any).pickup_deadline_operator_seen) {
+                playNotificationSound();
+                setPickupDeadlineFlashOrderIds(prev => new Set(prev).add(id));
+                window.setTimeout(() => {
+                  setPickupDeadlineFlashOrderIds(prev => {
+                    const n = new Set(prev);
+                    n.delete(id);
+                    return n;
+                  });
+                }, 4500);
+              }
             }
           }
-        }
-
-        fetchOrders();
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'order_items' }, () => {
-        fetchOrders();
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' }, () => {
-        fetchOrders();
-      })
-      .subscribe();
-
-    return () => {
-      ordersChannel.unsubscribe();
-    };
-  }, []);
+          fetchOrders();
+        },
+        onDelete: () => {
+          refreshAllOrdersData();
+        },
+      },
+      { table: 'order_items', onChange: () => fetchOrders() },
+      { table: 'customers', onChange: () => fetchOrders() },
+      { table: 'customer_notes', onChange: () => fetchOrders() },
+      { table: 'archive_orders', onChange: () => refreshAllOrdersData() },
+      { table: 'archive_order_items', onChange: () => fetchArchiveOrders() },
+      { table: 'archive_customer_notes', onChange: () => fetchArchiveOrders() },
+    ],
+  });
 
   // Refresh archive when archive tab is opened
   useEffect(() => {
@@ -783,6 +955,20 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never
             return next;
           });
         }
+        setPulseOrderBarId(orderId);
+        const domId = `order-bar-archive-${orderId}`;
+        const tryScroll = (attempt = 0) => {
+          const el = document.getElementById(domId);
+          if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            return;
+          }
+          if (attempt < 8) {
+            window.setTimeout(() => tryScroll(attempt + 1), 180);
+          }
+        };
+        window.setTimeout(() => tryScroll(0), 280);
+        window.setTimeout(() => setPulseOrderBarId(null), 2800);
       } else {
         setShowArchive(false);
         const inActive = activeOrdersRef.current.some((o) => o.id === orderId);
@@ -796,23 +982,10 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never
           // or filtered by current UI state — default to completed view so it can be found.
           setShowCompleted(true);
         }
+        scrollAndPulseOrder(orderId);
       }
-      setPulseOrderBarId(orderId);
-      const domId = kind === 'archive' ? `order-bar-archive-${orderId}` : `order-bar-${orderId}`;
-      const tryScroll = (attempt = 0) => {
-        const el = document.getElementById(domId);
-        if (el) {
-          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          return;
-        }
-        if (attempt < 8) {
-          window.setTimeout(() => tryScroll(attempt + 1), 180);
-        }
-      };
-      window.setTimeout(() => tryScroll(0), 280);
-      window.setTimeout(() => setPulseOrderBarId(null), 2800);
     }
-  }), [archiveGroups]);
+  }), [archiveGroups, scrollAndPulseOrder]);
 
   // Auto-search when any search field changes
   useEffect(() => {
@@ -866,6 +1039,22 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never
         updated_at: new Date().toISOString()
       })
       .eq('id', orderId);
+
+    // If reason is "No-show", add a private operator note
+    if (cancelReason.includes('عدم الحضور لأستلام الطلب')) {
+      const targetOrder = selectedOrder?.id === orderId ? selectedOrder : null;
+      if (targetOrder?.customer) {
+        await supabase
+          .from('customer_general_notes')
+          .insert([{
+            customer_phone: targetOrder.customer.phone,
+            customer_name: targetOrder.customer.name,
+            note: 'عميل لم يحضر للأستلام',
+            created_by: 'operator',
+            is_public: false
+          }]);
+      }
+    }
 
     // Update selectedOrder if it's the same order
     if (selectedOrder && selectedOrder.id === orderId) {
@@ -1347,30 +1536,62 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never
     }
   };
 
-  const getStatusInfo = (status: string, cancelledBy?: string) => {
+  const getStatusInfo = (status: string, cancelledBy?: string, deliveryMethod?: string) => {
+    if (deliveryMethod === 'pickup') {
+      switch (status) {
+        case 'under_review':
+          return { icon: Clock, text: 'قيد المعاينة', color: 'text-yellow-400', bg: 'bg-yellow-500/10', border: 'border-yellow-500/30' };
+        case 'preparing':
+          return { icon: Package, text: 'قيد التحضير', color: 'text-blue-400', bg: 'bg-blue-500/10', border: 'border-blue-500/30' };
+        case 'arrived':
+          return { icon: Package, text: 'تم التحضير', color: 'text-orange-400', bg: 'bg-orange-500/10', border: 'border-orange-500/30' };
+        case 'completed':
+          return { icon: CheckCircle, text: 'تم التسليم', color: 'text-green-400', bg: 'bg-green-500/10', border: 'border-green-500/30' };
+      }
+    }
+
     switch (status) {
       case 'under_review':
-        return { icon: Clock, text: 'قيد المعاينة', color: 'bg-yellow-600', textColor: 'text-yellow-400' };
+        return { icon: Clock, text: 'قيد المعاينة', color: 'text-yellow-400', bg: 'bg-yellow-500/10', border: 'border-yellow-500/30' };
       case 'preparing':
-        return { icon: Package, text: 'قيد التحضير', color: 'bg-blue-600', textColor: 'text-blue-400' };
+        return { icon: Package, text: 'قيد التحضير', color: 'text-blue-400', bg: 'bg-blue-500/10', border: 'border-blue-500/30' };
       case 'on_way':
-        return { icon: Truck, text: 'في الطريق', color: 'bg-purple-600', textColor: 'text-purple-400' };
+        return { icon: Truck, text: 'في الطريق', color: 'text-purple-400', bg: 'bg-purple-500/10', border: 'border-purple-500/30' };
       case 'arrived':
-        return { icon: AlertTriangle, text: 'وصل الآن', color: 'bg-orange-600', textColor: 'text-orange-400' };
+        return { icon: AlertTriangle, text: 'وصل الآن', color: 'text-orange-400', bg: 'bg-orange-500/10', border: 'border-orange-500/30' };
       case 'completed':
-        return { icon: CheckCircle, text: 'مكتمل', color: 'bg-green-600', textColor: 'text-green-400' };
+        return { icon: CheckCircle, text: 'مكتمل', color: 'text-green-400', bg: 'bg-green-500/10', border: 'border-green-500/30' };
       case 'cancelled':
         if (cancelledBy === 'customer') {
-          return { icon: XCircle, text: 'ملغي عميل', color: 'bg-red-600', textColor: 'text-red-400' };
+          return { icon: XCircle, text: 'ملغي عميل', color: 'text-red-400', bg: 'bg-red-500/10', border: 'border-red-500/30' };
         } else if (cancelledBy === 'operator') {
-          return { icon: XCircle, text: 'ملغي op', color: 'bg-red-600', textColor: 'text-red-400' };
+          return { icon: XCircle, text: 'ملغي op', color: 'text-red-400', bg: 'bg-red-500/10', border: 'border-red-500/30' };
         }
-        return { icon: XCircle, text: 'ملغي', color: 'bg-red-600', textColor: 'text-red-400' };
+        return { icon: XCircle, text: 'ملغي', color: 'text-red-400', bg: 'bg-red-500/10', border: 'border-red-500/30' };
       case 'cancellation_pending':
-        return { icon: Clock, text: 'طلب إلغاء', color: 'bg-yellow-600', textColor: 'text-yellow-400' };
+        return { icon: Clock, text: 'طلب إلغاء', color: 'text-yellow-400', bg: 'bg-yellow-500/10', border: 'border-yellow-500/30' };
       default:
-        return { icon: Package, text: status, color: 'bg-gray-600', textColor: 'text-gray-400' };
+        return { icon: Package, text: status, color: 'text-gray-400', bg: 'bg-gray-500/10', border: 'border-gray-500/30' };
     }
+  };
+
+  const getPickupCountdownMeta = (order: Pick<OrderWithDetails, 'delivery_method' | 'status'> & { pickup_deadline_at?: string | null }) => {
+    if (order.delivery_method !== 'pickup') return null;
+    if (!['under_review', 'preparing', 'arrived', 'cancellation_pending'].includes(order.status)) return null;
+    const raw = order.pickup_deadline_at;
+    if (!raw) return null;
+    const deadline = new Date(raw).getTime();
+    if (Number.isNaN(deadline)) return null;
+    const diff = deadline - pickupNowMs;
+    if (diff <= 0) {
+      return { text: 'انتهى وقت الاستلام', className: 'text-red-400' };
+    }
+    const totalSec = Math.floor(diff / 1000);
+    const hh = String(Math.floor(totalSec / 3600)).padStart(2, '0');
+    const mm = String(Math.floor((totalSec % 3600) / 60)).padStart(2, '0');
+    const ss = String(totalSec % 60).padStart(2, '0');
+    const className = diff < 15 * 60 * 1000 ? 'text-red-400 animate-pulse' : diff <= 60 * 60 * 1000 ? 'text-orange-300' : 'text-green-400';
+    return { text: `${hh}:${mm}:${ss}`, className };
   };
 
   // Drag handlers for modal
@@ -1420,8 +1641,10 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never
   }, [selectedOrder, selectedArchiveOrder]);
 
   const renderOrderBar = (order: OrderWithDetails) => {
-    const statusInfo = getStatusInfo(order.status, order.cancelled_by);
+    const statusToShow = order.status === 'cancellation_pending' ? (order.cancellation_stage || 'under_review') : order.status;
+    const statusInfo = getStatusInfo(statusToShow, order.cancelled_by, order.delivery_method);
     const StatusIcon = statusInfo.icon;
+    const pickupTimer = getPickupCountdownMeta(order as any);
 
     const customerName = order.customer_name || order.customer?.name || 'عميل';
     const customerPhone = order.customer_phone || order.customer?.phone || '';
@@ -1430,74 +1653,107 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never
     const address = `${order.customer_street || order.customer?.street || ''}, ${order.customer_area || order.customer?.area || ''}, ${order.customer_city || order.customer?.city || ''}`;
 
     const noteFlash = customerNoteFlashOrderIds.has(order.id);
+    const deadlineFlash = pickupDeadlineFlashOrderIds.has(order.id);
     const noteUnread = order.order_note && !readNotes.has(`order-note-${order.id}`);
+    const deadlineUpdated = order.delivery_method === 'pickup' && !!order.pickup_deadline_updated_at;
+    const deadlineUnread = deadlineUpdated && !order.pickup_deadline_operator_seen;
 
     return (
       <div
         key={order.id}
         id={`order-bar-${order.id}`}
-        onClick={async () => {
-          setSelectedOrder(order);
-          setReadOrders(prev => new Set(prev).add(order.id));
-          // Mark notes as read too
-          setReadNotes(prev => {
-            const next = new Set(prev);
-            order.notes.forEach(n => next.add(n.id));
-            if (order.order_note) next.add(`order-note-${order.id}`);
-            return next;
-          });
-          
-          if (order.customer_update_flag) {
-            await supabase.from('orders').update({ customer_update_flag: false }).eq('id', order.id);
-          }
-        }}
+        onClick={() => handleOpenOrder(order)}
         className={`bg-gray-900/50 border-2 rounded-lg p-4 hover:border-purple-400 transition-all cursor-pointer relative overflow-hidden ${
           pulseOrderBarId === order.id ? 'order-bar-pulse' : ''
-        } ${order.customer_update_flag ? 'border-yellow-500 shadow-[0_0_15px_rgba(234,179,8,0.3)]' : 'border-purple-500/30'}`}
+        } border-purple-500/30`}
       >
-        {order.customer_update_flag && (
-          <div className="absolute top-0 right-0 left-0 h-1 bg-yellow-500 animate-pulse"></div>
-        )}
         
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4 flex-1">
-            <div className={`${statusInfo.color} text-white px-3 py-1.5 rounded-lg flex items-center gap-2`}>
-              <StatusIcon className="w-4 h-4" />
+            <div className={`px-4 py-2 rounded-full border flex items-center gap-2 ${statusInfo.bg} ${statusInfo.border} ${statusInfo.color}`}>
               <span className="font-bold text-sm">{statusInfo.text}</span>
+              <StatusIcon className="w-5 h-5" />
             </div>
+            {pickupTimer && (
+              <div className={`px-2 py-1 rounded-md bg-black/35 border border-white/10 text-xs font-black ${pickupTimer.className}`}>
+                {pickupTimer.text}
+              </div>
+            )}
 
             <div className="flex-1 text-right">
-              <div className="flex items-center justify-end gap-3">
-                {order.customer_update_flag && (
-                  <span className="bg-yellow-500 text-black text-[10px] px-2 py-0.5 rounded-full font-black animate-bounce">
-                    تحديث من العميل!
+              <div className="flex items-center justify-end gap-2">
+                {/* Customer Order items update flag - icon stays visible after read (muted) */}
+                {(order.customer_update_flag || readCartUpdates.has(order.id)) && (
+                  <span
+                    title={language === 'ar' ? 'تحديث الطلب' : 'Order Updated'}
+                    className={`p-1.5 rounded-full border transition-all duration-300 ${
+                      order.customer_update_flag
+                        ? 'bg-green-600 text-white border-green-400 animate-pulse shadow-[0_0_8px_rgba(34,197,94,0.6)]'
+                        : 'bg-green-600/50 text-green-200 border-green-500/30'
+                    }`}
+                  >
+                    <ShoppingCart className="w-4 h-4" />
                   </span>
                 )}
+                
+                {/* Customer Note Icon */}
                 {order.order_note && (
-                  <span className={`px-2 py-0.5 rounded-full font-bold flex items-center gap-1 border text-[10px] transition-shadow duration-300 ${
-                    noteFlash
-                      ? 'bg-cyan-600 text-white border-cyan-300 shadow-[0_0_22px_rgba(34,211,238,0.95)] animate-pulse ring-2 ring-cyan-300'
-                      : noteUnread
-                        ? 'bg-blue-600 text-white border-blue-400 animate-pulse'
-                        : 'bg-blue-600/50 text-blue-200 border-blue-500/30'
-                  }`}>
-                    <StickyNote className="w-3 h-3" />
-                    {language === 'ar' ? 'ملاحظة عميل' : 'Customer Note'}
+                  <span
+                    title={language === 'ar' ? 'ملاحظة عميل' : 'Customer Note'}
+                    className={`p-1.5 rounded-full border transition-all duration-300 ${
+                      noteFlash
+                        ? 'bg-purple-600 text-white border-purple-300 shadow-[0_0_15px_rgba(168,85,247,0.85)] animate-pulse ring-1 ring-purple-300'
+                        : noteUnread
+                          ? 'bg-purple-600 text-white border-purple-400 animate-pulse shadow-[0_0_8px_rgba(168,85,247,0.6)]'
+                          : 'bg-purple-600/50 text-purple-200 border-purple-500/30'
+                    }`}
+                  >
+                    <MessageSquare className="w-4 h-4" />
                   </span>
                 )}
+                
+                {/* Operator Note Icon */}
                 {order.notes.length > 0 && (
-                  <span className={`px-2 py-0.5 rounded-full font-bold flex items-center gap-1 border ${
-                    order.notes.some(n => !readNotes.has(n.id))
-                    ? 'bg-yellow-600 text-white border-yellow-400 animate-pulse'
-                    : 'bg-yellow-600/50 text-yellow-200 border-yellow-500/30'
-                  } text-[10px]`}>
-                    <StickyNote className="w-3 h-3" />
-                    {language === 'ar' ? 'ملاحظة أوبراتور' : 'Op Note'}
+                  <span
+                    title={language === 'ar' ? 'ملاحظة أوبراتور' : 'Op Note'}
+                    className={`p-1.5 rounded-full border transition-all duration-300 ${
+                      order.notes.some(n => !readNotes.has(n.id))
+                        ? 'bg-yellow-600 text-white border-yellow-400 animate-pulse shadow-[0_0_8px_rgba(234,179,8,0.6)]'
+                        : 'bg-yellow-600/50 text-yellow-200 border-yellow-500/30'
+                    }`}
+                  >
+                    <StickyNote className="w-4 h-4" />
                   </span>
                 )}
-                <h3 className="text-lg font-bold text-white">#{order.order_number}</h3>
+                
+                {/* Pickup Updated Icon */}
+                {deadlineUpdated && (
+                  <span
+                    title={language === 'ar' ? 'تعديل موعد الاستلام' : 'Pickup Updated'}
+                    className={`p-1.5 rounded-full border transition-all duration-300 ${
+                      deadlineFlash
+                        ? 'bg-blue-600 text-white border-blue-300 shadow-[0_0_15px_rgba(37,99,235,0.85)] animate-pulse ring-1 ring-blue-300'
+                        : deadlineUnread
+                          ? 'bg-blue-600 text-white border-blue-400 animate-pulse shadow-[0_0_8px_rgba(37,99,235,0.6)]'
+                          : 'bg-blue-600/50 text-blue-200 border-blue-500/30'
+                    }`}
+                  >
+                    <Clock className="w-4 h-4" />
+                  </span>
+                )}
+
+                {order.status === 'cancellation_pending' && (
+                  <span
+                    title={language === 'ar' ? 'طلب إلغاء' : 'Cancel Request'}
+                    className="p-1.5 rounded-full border transition-all duration-300 bg-red-600 text-white border-red-400 animate-pulse shadow-[0_0_15px_rgba(220,38,38,0.85)] ring-1 ring-red-300"
+                  >
+                    <XCircle className="w-4 h-4" />
+                  </span>
+                )}
+
+                <h3 className="text-lg font-bold text-white mr-1">#{order.order_number}</h3>
               </div>
-              <p className="text-gray-400 text-[10px] mt-1">
+              <p className="text-gray-400 text-[10px] mt-1 mr-1">
                 {new Date(order.created_at).toLocaleDateString('ar-EG', {
                   year: 'numeric',
                   month: 'short',
@@ -1548,8 +1804,10 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never
     if (!selectedOrder) return null;
 
     const order = selectedOrder;
-    const statusInfo = getStatusInfo(order.status, order.cancelled_by);
+    const statusToShow = order.status === 'cancellation_pending' ? (order.cancellation_stage || 'under_review') : order.status;
+    const statusInfo = getStatusInfo(statusToShow, order.cancelled_by, order.delivery_method);
     const StatusIcon = statusInfo.icon;
+    const pickupTimer = getPickupCountdownMeta(order as any);
 
     return (
       <div
@@ -1601,10 +1859,23 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never
               </div>
 
               <div className="flex flex-col items-end gap-2">
-                <div className={`${statusInfo.color} text-white px-4 py-2 rounded-lg flex items-center gap-2 w-fit`}>
-                  <span className="font-bold">{statusInfo.text}</span>
-                  <StatusIcon className="w-5 h-5" />
+                <div className={`${statusInfo.bg} ${statusInfo.border} ${statusInfo.color} px-4 py-2 rounded-full border flex items-center gap-2 w-fit`}>
+                  <span className="font-bold text-lg">{statusInfo.text}</span>
+                  <StatusIcon className="w-6 h-6" />
                 </div>
+                {pickupTimer && (
+                  <div className="flex flex-col items-end gap-1">
+                    <div className={`px-3 py-1 rounded-lg bg-black/35 border border-white/10 text-sm font-black ${pickupTimer.className} relative`}>
+                      {pickupTimer.text}
+                      {order.pickup_deadline_updated_at && (
+                        <span className="absolute -top-1 -right-1 w-2 h-2 bg-blue-500 rounded-full animate-pulse shadow-[0_0_5px_rgba(59,130,246,0.8)]"></span>
+                      )}
+                    </div>
+                    {order.pickup_deadline_updated_at && (
+                      <span className="text-[10px] text-blue-400 font-bold bg-blue-950/40 px-2 py-0.5 rounded border border-blue-500/30">تم تحديث موعد الاستلام</span>
+                    )}
+                  </div>
+                )}
 
                 {order.delivery_method && (
                   <div className={`px-3 py-1 rounded-lg flex items-center gap-2 text-sm font-bold ${order.delivery_method === 'pickup'
@@ -1898,54 +2169,81 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never
             )}
 
             <div className="flex flex-wrap gap-2">
-              {order.status === 'under_review' && (
+              {order.delivery_method === 'pickup' ? (
                 <>
-                  <button
-                    onClick={() => updateOrderStatus(order.id, 'preparing')}
-                    disabled={updatingStatusOrderId === order.id}
-                    className="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-2 rounded-lg transition-colors font-bold"
-                  >
-                    قيد التحضير
-                  </button>
+                  {(order.status === 'under_review' || order.status === 'preparing') && (
+                    <button
+                      onClick={() => updateOrderStatus(order.id, order.status === 'under_review' ? 'preparing' : 'arrived')}
+                      disabled={updatingStatusOrderId === order.id}
+                      className="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-2 rounded-lg transition-colors font-bold"
+                    >
+                      {order.status === 'under_review' ? 'قيد التحضير' : 'تم التحضير'}
+                    </button>
+                  )}
+                  {order.status === 'arrived' && (
+                    <button
+                      onClick={() => updateOrderStatus(order.id, 'completed')}
+                      disabled={updatingStatusOrderId === order.id}
+                      className="flex-1 bg-green-600 hover:bg-green-500 text-white py-2 rounded-lg transition-colors font-bold"
+                    >
+                      تم التسليم والدفع
+                    </button>
+                  )}
                 </>
-              )}
-
-              {order.status === 'preparing' && (
+              ) : (
                 <>
-                  <button
-                    onClick={() => updateOrderStatus(order.id, 'on_way')}
-                    disabled={updatingStatusOrderId === order.id}
-                    className="flex-1 bg-purple-600 hover:bg-purple-500 text-white py-2 rounded-lg transition-colors font-bold"
-                  >
-                    في الطريق
-                  </button>
+                  {order.status === 'under_review' && (
+                    <button
+                      onClick={() => updateOrderStatus(order.id, 'preparing')}
+                      disabled={updatingStatusOrderId === order.id}
+                      className="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-2 rounded-lg transition-colors font-bold"
+                    >
+                      قيد التحضير
+                    </button>
+                  )}
+
+                  {order.status === 'preparing' && (
+                    <button
+                      onClick={() => updateOrderStatus(order.id, 'on_way')}
+                      disabled={updatingStatusOrderId === order.id}
+                      className="flex-1 bg-purple-600 hover:bg-purple-500 text-white py-2 rounded-lg transition-colors font-bold"
+                    >
+                      في الطريق
+                    </button>
+                  )}
+
+                  {order.status === 'on_way' && (
+                    <button
+                      onClick={() => updateOrderStatus(order.id, 'arrived')}
+                      disabled={updatingStatusOrderId === order.id}
+                      className="flex-1 bg-orange-600 hover:bg-orange-500 text-white py-2 rounded-lg transition-colors font-bold"
+                    >
+                      وصل الآن
+                    </button>
+                  )}
+
+                  {order.status === 'arrived' && (
+                    <button
+                      onClick={() => updateOrderStatus(order.id, 'completed')}
+                      disabled={updatingStatusOrderId === order.id}
+                      className="flex-1 bg-green-600 hover:bg-green-500 text-white py-2 rounded-lg transition-colors font-bold"
+                    >
+                      تم التسليم والدفع
+                    </button>
+                  )}
                 </>
-              )}
-
-              {order.status === 'on_way' && (
-                <button
-                  onClick={() => updateOrderStatus(order.id, 'arrived')}
-                  disabled={updatingStatusOrderId === order.id}
-                  className="flex-1 bg-orange-600 hover:bg-orange-500 text-white py-2 rounded-lg transition-colors font-bold"
-                >
-                  وصل الآن
-                </button>
-              )}
-
-              {order.status === 'arrived' && (
-                <button
-                  onClick={() => updateOrderStatus(order.id, 'completed')}
-                  disabled={updatingStatusOrderId === order.id}
-                  className="flex-1 bg-green-600 hover:bg-green-500 text-white py-2 rounded-lg transition-colors font-bold"
-                >
-                  تم التسليم والدفع
-                </button>
               )}
 
               {order.status !== 'cancelled' && (
                 <button
                   onClick={() => {
                     setSelectedOrder(order);
+                    const isExpired = pickupTimer && pickupTimer.text === 'انتهى وقت الاستلام';
+                    if (isExpired) {
+                      setCancelReason('عدم الحضور لأستلام الطلب');
+                    } else {
+                      setCancelReason('');
+                    }
                     setShowCancelModal(true);
                   }}
                   disabled={updatingStatusOrderId === order.id}
@@ -1954,7 +2252,6 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never
                   إلغاء
                 </button>
               )}
-
             </div>
 
             {selectedOrder && (
@@ -2013,9 +2310,9 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never
       >
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4 flex-1">
-            <div className={`${statusInfo.color} text-white px-3 py-1.5 rounded-lg flex items-center gap-2`}>
-              <StatusIcon className="w-4 h-4" />
+            <div className={`px-4 py-2 rounded-full border flex items-center gap-2 ${statusInfo.bg} ${statusInfo.border} ${statusInfo.color}`}>
               <span className="font-bold text-sm">{statusInfo.text}</span>
+              <StatusIcon className="w-5 h-5" />
             </div>
 
             <div className="flex-1 text-right">
@@ -2337,7 +2634,6 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never
   };
 
   return (
-    <>
     <div className="space-y-6">
       <div className="bg-gray-900/50 border-2 border-purple-500/30 rounded-xl p-4">
         <div className="flex justify-between items-center mb-4">
@@ -2487,6 +2783,203 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never
             الأرشيف ({archiveOrders.length})
           </button>
         </div>
+
+        {/* Top Aggregated Notifications Widgets */}
+        <div className="flex items-center gap-3 relative flex-wrap px-1 py-1" ref={dropdownRef}>
+          {/* Clock Notifications */}
+          <div className="relative shrink-0">
+            <button
+              onClick={() => clockNotificationOrders.length > 0 && handleNotificationClick('clock')}
+              disabled={clockNotificationOrders.length === 0}
+              title={language === 'ar' ? 'تعديلات مواعيد الاستلام' : 'Pickup Time Updates'}
+              className={`p-2.5 rounded-xl border transition-all duration-300 flex items-center justify-center ${
+                clockNotificationOrders.length > 0
+                  ? activeDropdown === 'clock'
+                    ? 'bg-blue-600 text-white border-blue-400 shadow-[0_0_15px_rgba(37,99,235,0.85)] scale-105 font-bold cursor-pointer'
+                    : 'bg-gray-800 text-blue-400 border-blue-500/30 hover:border-blue-400 hover:bg-blue-600/10 cursor-pointer'
+                  : 'bg-gray-950/40 text-gray-700 border-gray-800 cursor-not-allowed opacity-40'
+              }`}
+            >
+              <Clock className={`w-5 h-5 ${clockUnreadCount > 0 ? 'animate-pulse' : ''}`} />
+              {clockNotificationOrders.length > 1 && (
+                <span className="absolute -top-1.5 -right-1.5 bg-red-600 text-white text-[10px] font-black w-5 h-5 rounded-full flex items-center justify-center border border-gray-900 shadow-md">
+                  {clockNotificationOrders.length}
+                </span>
+              )}
+            </button>
+          </div>
+
+          {/* Customer Note Notifications */}
+          <div className="relative shrink-0">
+            <button
+              onClick={() => customerNoteNotificationOrders.length > 0 && handleNotificationClick('customerNote')}
+              disabled={customerNoteNotificationOrders.length === 0}
+              title={language === 'ar' ? 'ملاحظات العملاء الجديدة' : 'New Customer Notes'}
+              className={`p-2.5 rounded-xl border transition-all duration-300 flex items-center justify-center ${
+                customerNoteNotificationOrders.length > 0
+                  ? activeDropdown === 'customerNote'
+                    ? 'bg-purple-600 text-white border-purple-400 shadow-[0_0_15px_rgba(168,85,247,0.85)] scale-105 font-bold cursor-pointer'
+                    : 'bg-gray-800 text-purple-400 border-purple-500/30 hover:border-purple-400 hover:bg-purple-600/10 cursor-pointer'
+                  : 'bg-gray-950/40 text-gray-700 border-gray-800 cursor-not-allowed opacity-40'
+              }`}
+            >
+              <MessageSquare className={`w-5 h-5 ${customerNoteUnreadCount > 0 ? 'animate-pulse' : ''}`} />
+              {customerNoteNotificationOrders.length > 1 && (
+                <span className="absolute -top-1.5 -right-1.5 bg-red-600 text-white text-[10px] font-black w-5 h-5 rounded-full flex items-center justify-center border border-gray-900 shadow-md">
+                  {customerNoteNotificationOrders.length}
+                </span>
+              )}
+            </button>
+          </div>
+
+          {/* Operator Note Notifications */}
+          <div className="relative shrink-0">
+            <button
+              onClick={() => operatorNoteNotificationOrders.length > 0 && handleNotificationClick('operatorNote')}
+              disabled={operatorNoteNotificationOrders.length === 0}
+              title={language === 'ar' ? 'ملاحظات الأوبراتور الجديدة' : 'New Operator Notes'}
+              className={`p-2.5 rounded-xl border transition-all duration-300 flex items-center justify-center ${
+                operatorNoteNotificationOrders.length > 0
+                  ? activeDropdown === 'operatorNote'
+                    ? 'bg-yellow-600 text-white border-yellow-400 shadow-[0_0_15px_rgba(234,179,8,0.85)] scale-105 font-bold cursor-pointer'
+                    : 'bg-gray-800 text-yellow-400 border-yellow-500/30 hover:border-yellow-400 hover:bg-yellow-600/10 cursor-pointer'
+                  : 'bg-gray-950/40 text-gray-700 border-gray-800 cursor-not-allowed opacity-40'
+              }`}
+            >
+              <StickyNote className={`w-5 h-5 ${operatorNoteUnreadCount > 0 ? 'animate-pulse' : ''}`} />
+              {operatorNoteNotificationOrders.length > 1 && (
+                <span className="absolute -top-1.5 -right-1.5 bg-red-600 text-white text-[10px] font-black w-5 h-5 rounded-full flex items-center justify-center border border-gray-900 shadow-md">
+                  {operatorNoteNotificationOrders.length}
+                </span>
+              )}
+            </button>
+          </div>
+
+          {/* Order Update Notifications */}
+          <div className="relative shrink-0">
+            <button
+              onClick={() => customerUpdateNotificationOrders.length > 0 && handleNotificationClick('update')}
+              disabled={customerUpdateNotificationOrders.length === 0}
+              title={language === 'ar' ? 'تعديلات الطلبات من العملاء' : 'Customer Order Updates'}
+              className={`p-2.5 rounded-xl border transition-all duration-300 flex items-center justify-center ${
+                customerUpdateNotificationOrders.length > 0
+                  ? activeDropdown === 'update'
+                    ? 'bg-green-600 text-white border-green-400 shadow-[0_0_15px_rgba(22,163,74,0.85)] scale-105 font-bold cursor-pointer'
+                    : 'bg-gray-800 text-green-400 border-green-500/30 hover:border-green-400 hover:bg-green-600/10 cursor-pointer'
+                  : 'bg-gray-950/40 text-gray-700 border-gray-800 cursor-not-allowed opacity-40'
+              }`}
+            >
+              <ShoppingCart className={`w-5 h-5 ${customerUpdateUnreadCount > 0 ? 'animate-pulse' : ''}`} />
+              {customerUpdateNotificationOrders.length > 1 && (
+                <span className="absolute -top-1.5 -right-1.5 bg-red-600 text-white text-[10px] font-black w-5 h-5 rounded-full flex items-center justify-center border border-gray-900 shadow-md">
+                  {customerUpdateNotificationOrders.length}
+                </span>
+              )}
+            </button>
+          </div>
+
+          {/* Cancel Notifications */}
+          <div className="relative shrink-0">
+            <button
+              onClick={() => cancelNotificationOrders.length > 0 && handleNotificationClick('cancel')}
+              disabled={cancelNotificationOrders.length === 0}
+              title={language === 'ar' ? 'طلبات الإلغاء من العملاء' : 'Customer Cancel Requests'}
+              className={`p-2.5 rounded-xl border transition-all duration-300 flex items-center justify-center ${
+                cancelNotificationOrders.length > 0
+                  ? activeDropdown === 'cancel'
+                    ? 'bg-red-600 text-white border-red-400 shadow-[0_0_15px_rgba(220,38,38,0.85)] scale-105 font-bold cursor-pointer'
+                    : 'bg-gray-800 text-red-400 border-red-500/30 hover:border-red-400 hover:bg-red-600/10 cursor-pointer'
+                  : 'bg-gray-950/40 text-gray-700 border-gray-800 cursor-not-allowed opacity-40'
+              }`}
+            >
+              <XCircle className={`w-5 h-5 ${cancelNotificationOrders.length > 0 ? 'animate-pulse' : ''}`} />
+              {cancelNotificationOrders.length > 1 && (
+                <span className="absolute -top-1.5 -right-1.5 bg-red-600 text-white text-[10px] font-black w-5 h-5 rounded-full flex items-center justify-center border border-gray-900 shadow-md">
+                  {cancelNotificationOrders.length}
+                </span>
+              )}
+            </button>
+          </div>
+
+          {/* Dropdown list of orders for the selected notification type */}
+          {activeDropdown && (
+            <div className="absolute top-12 left-0 z-30 w-72 bg-gray-950/95 border-2 border-purple-500/40 rounded-xl shadow-2xl p-2 max-h-[220px] overflow-y-auto custom-scrollbar animate-in fade-in duration-200" dir="rtl">
+              <div className="text-right text-[10px] text-gray-400 px-3 py-1 border-b border-white/5 mb-1 flex items-center justify-between font-bold">
+                <span>
+                  {activeDropdown === 'clock' && (language === 'ar' ? 'تعديلات مواعيد الاستلام' : 'Pickup Updated')}
+                  {activeDropdown === 'customerNote' && (language === 'ar' ? 'ملاحظات العملاء غير المقروءة' : 'Unread Customer Notes')}
+                  {activeDropdown === 'operatorNote' && (language === 'ar' ? 'ملاحظات الأوبراتور غير المقروءة' : 'Unread Operator Notes')}
+                  {activeDropdown === 'update' && (language === 'ar' ? 'تعديلات الطلبات' : 'Order Updates')}
+                  {activeDropdown === 'cancel' && (language === 'ar' ? 'طلبات إلغاء قيد الانتظار' : 'Pending Cancel Requests')}
+                </span>
+                <span className="bg-purple-900/40 px-1.5 py-0.5 rounded text-purple-300 font-black">
+                  {activeDropdown === 'clock' && clockNotificationOrders.length}
+                  {activeDropdown === 'customerNote' && customerNoteNotificationOrders.length}
+                  {activeDropdown === 'operatorNote' && operatorNoteNotificationOrders.length}
+                  {activeDropdown === 'update' && customerUpdateNotificationOrders.length}
+                  {activeDropdown === 'cancel' && cancelNotificationOrders.length}
+                </span>
+              </div>
+              <div className="space-y-1">
+                {(
+                  activeDropdown === 'clock'
+                    ? clockNotificationOrders
+                    : activeDropdown === 'customerNote'
+                    ? customerNoteNotificationOrders
+                    : activeDropdown === 'operatorNote'
+                    ? operatorNoteNotificationOrders
+                    : activeDropdown === 'update'
+                    ? customerUpdateNotificationOrders
+                    : cancelNotificationOrders
+                ).map(order => {
+                  const name = order.customer_name || order.customer?.name || (language === 'ar' ? 'عميل' : 'Customer');
+                  
+                  let previewText = '';
+                  if (activeDropdown === 'clock') {
+                    if (order.pickup_deadline_at) {
+                      previewText = new Date(order.pickup_deadline_at).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
+                    }
+                  } else if (activeDropdown === 'customerNote') {
+                    const unreadNote = order.order_note;
+                    previewText = unreadNote ? (unreadNote.length > 25 ? unreadNote.substring(0, 25) + '...' : unreadNote) : '';
+                  } else if (activeDropdown === 'operatorNote') {
+                    const unreadNote = order.notes.find(n => !readNotes.has(n.id))?.note;
+                    previewText = unreadNote ? (unreadNote.length > 25 ? unreadNote.substring(0, 25) + '...' : unreadNote) : '';
+                  } else if (activeDropdown === 'update') {
+                    previewText = language === 'ar' ? 'تم تحديث محتويات الطلب' : 'Order items updated';
+                  } else if (activeDropdown === 'cancel') {
+                    previewText = order.cancellation_reason ? (order.cancellation_reason.length > 25 ? order.cancellation_reason.substring(0, 25) + '...' : order.cancellation_reason) : '';
+                  }
+
+                  const isUnread = 
+                    activeDropdown === 'clock' ? !order.pickup_deadline_operator_seen :
+                    activeDropdown === 'customerNote' ? !readNotes.has(`order-note-${order.id}`) :
+                    activeDropdown === 'operatorNote' ? order.notes.some(n => !readNotes.has(n.id)) :
+                    activeDropdown === 'update' ? order.customer_update_flag :
+                    activeDropdown === 'cancel' ? true : false;
+
+                  return (
+                    <button
+                      key={order.id}
+                      onClick={() => handleSelectNotificationOrder(order)}
+                      className={`w-full text-right px-3 py-2 rounded-lg hover:bg-purple-600/20 active:bg-purple-600/30 transition-all flex flex-col gap-0.5 border ${
+                        isUnread ? 'bg-purple-900/30 border-purple-500/50 shadow-[0_0_10px_rgba(168,85,247,0.3)] animate-pulse' : 'bg-transparent border-transparent opacity-75'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between w-full">
+                        <span className="text-white font-bold text-xs">#{order.order_number}</span>
+                        <span className="text-green-400 font-bold text-[11px] truncate max-w-[120px]">{name}</span>
+                      </div>
+                      {previewText && (
+                        <span className="text-[10px] text-gray-400 mt-0.5 truncate">{previewText}</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="space-y-3">
@@ -2596,7 +3089,6 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never
           address={mapLocation.address}
         />
       )}
-    </div>
       <style>{`
         @keyframes orderBarPulse {
           0% { box-shadow: 0 0 0 0 rgba(34, 211, 238, 0); }
@@ -2607,7 +3099,7 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, Record<string, never
           animation: orderBarPulse 2.6s ease-out;
         }
       `}</style>
-    </>
+    </div>
   );
 });
 

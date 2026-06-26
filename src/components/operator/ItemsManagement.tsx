@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { supabase, Category, Item } from '../../lib/supabase';
-import { Plus, Edit2, Trash2, ArrowUp, ArrowDown, Upload, X, Loader2 } from 'lucide-react';
+import { useRealtimeRefetch } from '../../hooks/useRealtimeSubscription';
+import { uploadItemImage, isItemImageOptimized, reoptimizeRemoteItemImage } from '../../lib/imageUpload';
+import { Plus, Edit2, Trash2, ArrowUp, ArrowDown, Upload, X, Loader2, Eye, EyeOff, CheckCircle, XCircle } from 'lucide-react';
 
 export default function ItemsManagement() {
   const [categories, setCategories] = useState<Category[]>([]);
@@ -36,27 +38,9 @@ export default function ItemsManagement() {
     fetchData();
   }, []);
 
-  // Keep operator UI in sync with DB changes
-  useEffect(() => {
-    const categoriesChannel = supabase
-      .channel('op-categories-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'categories' }, () => {
-        fetchData();
-      })
-      .subscribe();
-
-    const itemsChannel = supabase
-      .channel('op-items-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'items' }, () => {
-        fetchData();
-      })
-      .subscribe();
-
-    return () => {
-      categoriesChannel.unsubscribe();
-      itemsChannel.unsubscribe();
-    };
-  }, []);
+  useRealtimeRefetch('op-menu', ['categories', 'items'], () => {
+    void fetchData();
+  });
 
   const fetchData = async () => {
     const [categoriesRes, itemsRes] = await Promise.all([
@@ -99,26 +83,7 @@ export default function ItemsManagement() {
   };
 
   const uploadImage = async (file: File): Promise<string> => {
-    const fileExt = file.name.split('.').pop();
-    const fileName = `item_${Date.now()}_${Math.random().toString(36).substring(7)}.${fileExt}`;
-    const filePath = `items/${fileName}`;
-
-    const { error: uploadError } = await supabase.storage
-      .from('item-images')
-      .upload(filePath, file, {
-        cacheControl: '3600',
-        upsert: false
-      });
-
-    if (uploadError) {
-      throw uploadError;
-    }
-
-    const { data } = supabase.storage
-      .from('item-images')
-      .getPublicUrl(filePath);
-
-    return data.publicUrl;
+    return uploadItemImage(supabase, file);
   };
 
   const handleSaveItem = async () => {
@@ -184,6 +149,16 @@ export default function ItemsManagement() {
       await supabase.from('items').delete().eq('id', id);
       fetchData();
     }
+  };
+
+  const toggleItemActive = async (item: Item) => {
+    await supabase.from('items').update({ is_active: !item.is_active }).eq('id', item.id);
+    fetchData();
+  };
+
+  const toggleItemAvailable = async (item: Item) => {
+    await supabase.from('items').update({ is_available: !item.is_available }).eq('id', item.id);
+    fetchData();
   };
 
   const moveItem = async (item: Item, direction: 'up' | 'down') => {
@@ -312,17 +287,19 @@ export default function ItemsManagement() {
       {activeMainTab === 'items' ? (
         <>
           <div className="flex flex-col md:flex-row items-center justify-between gap-4 bg-gray-900/50 p-4 rounded-xl border border-purple-500/30">
-            <button
-              onClick={() => {
-                setEditingItem(null);
-                resetForm();
-                setShowItemModal(true);
-              }}
-              className="w-full md:w-auto bg-purple-600 hover:bg-purple-500 text-white px-6 py-3 rounded-lg flex items-center justify-center gap-2 transition-all font-bold shadow-lg shadow-purple-900/20"
-            >
-              <Plus className="w-5 h-5" />
-              <span>إضافة صنف جديد</span>
-            </button>
+            <div className="flex flex-col sm:flex-row gap-2 w-full md:w-auto">
+              <button
+                onClick={() => {
+                  setEditingItem(null);
+                  resetForm();
+                  setShowItemModal(true);
+                }}
+                className="w-full sm:w-auto bg-purple-600 hover:bg-purple-500 text-white px-6 py-3 rounded-lg flex items-center justify-center gap-2 transition-all font-bold shadow-lg shadow-purple-900/20"
+              >
+                <Plus className="w-5 h-5" />
+                <span>إضافة صنف جديد</span>
+              </button>
+            </div>
 
             <div className="flex items-center gap-2 overflow-x-auto pb-2 md:pb-0 w-full md:w-auto scrollbar-hide">
               <button
@@ -356,7 +333,7 @@ export default function ItemsManagement() {
                   <img
                     src={item.image_url || 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=500'}
                     alt={item.name}
-                    className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500"
+                    className="w-full h-full object-cover"
                   />
                   {!item.is_active && (
                     <div className="absolute inset-0 bg-black/60 backdrop-blur-[2px] flex items-center justify-center">
@@ -394,6 +371,20 @@ export default function ItemsManagement() {
 
                   <div className="flex items-center justify-between pt-4 border-t border-purple-500/20">
                     <div className="flex gap-2">
+                      <button
+                        onClick={() => toggleItemActive(item)}
+                        className={`p-2 rounded-lg transition-all shadow-lg ${item.is_active ? 'bg-green-600/30 text-green-400 hover:bg-green-600 hover:text-white shadow-green-900/20' : 'bg-gray-600/30 text-gray-400 hover:bg-gray-600 hover:text-white shadow-gray-900/20'}`}
+                        title={item.is_active ? "إخفاء الصنف" : "إظهار الصنف"}
+                      >
+                        {item.is_active ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+                      </button>
+                      <button
+                        onClick={() => toggleItemAvailable(item)}
+                        className={`p-2 rounded-lg transition-all shadow-lg ${item.is_available ? 'bg-emerald-600/30 text-emerald-400 hover:bg-emerald-600 hover:text-white shadow-emerald-900/20' : 'bg-orange-600/30 text-orange-400 hover:bg-orange-600 hover:text-white shadow-orange-900/20'}`}
+                        title={item.is_available ? "جعل الصنف غير متوفر" : "جعل الصنف متوفر"}
+                      >
+                        {item.is_available ? <CheckCircle className="w-4 h-4" /> : <XCircle className="w-4 h-4" />}
+                      </button>
                       <button
                         onClick={() => handleEditItem(item)}
                         className="p-2 bg-blue-600/30 text-blue-400 rounded-lg hover:bg-blue-600 hover:text-white transition-all shadow-lg shadow-blue-900/20"

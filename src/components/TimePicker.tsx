@@ -10,6 +10,7 @@ interface TimePickerProps {
   initialMinute: number;
   initialAmPm: 'AM' | 'PM';
   language: 'ar' | 'en';
+  onDelete?: () => void;
 }
 
 const TimePicker: React.FC<TimePickerProps> = ({
@@ -19,7 +20,8 @@ const TimePicker: React.FC<TimePickerProps> = ({
   initialHour,
   initialMinute,
   initialAmPm,
-  language
+  language,
+  onDelete
 }) => {
   const [hour, setHour] = useState(initialHour);
   const [minute, setMinute] = useState(initialMinute);
@@ -375,7 +377,19 @@ const TimePicker: React.FC<TimePickerProps> = ({
 
           {/* Footer Actions */}
           <div className="flex items-center justify-between">
-            <div />
+            <div>
+              {onDelete && (
+                <button
+                  onClick={() => {
+                    onDelete();
+                    handleClose();
+                  }}
+                  className="px-6 py-2 text-red-400 font-bold hover:text-red-300 transition-all text-sm"
+                >
+                  {language === 'ar' ? 'حذف' : 'Delete'}
+                </button>
+              )}
+            </div>
 
             <div className="flex gap-4">
               <button

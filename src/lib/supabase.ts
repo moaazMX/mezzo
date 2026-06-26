@@ -1,4 +1,4 @@
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -7,13 +7,26 @@ if (!supabaseUrl || !supabaseAnonKey) {
   throw new Error('Missing Supabase environment variables');
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-  realtime: {
-    params: {
-      eventsPerSecond: 10,
-    },
-  },
-});
+let supabaseInstance: SupabaseClient | null = null;
+
+export const getSupabase = () => {
+  if (!supabaseInstance) {
+    supabaseInstance = createClient(supabaseUrl, supabaseAnonKey, {
+      realtime: {
+        params: {
+          eventsPerSecond: 10,
+        },
+      },
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+      },
+    });
+  }
+  return supabaseInstance;
+};
+
+export const supabase = getSupabase();
 
 export interface Category {
   id: string;
@@ -58,6 +71,7 @@ export interface Customer {
   floor?: string;
   house_name?: string;
   company_name?: string;
+  secondary_phone?: string;
   device_fingerprint?: string;
   latitude?: number;
   longitude?: number;
@@ -71,7 +85,37 @@ export interface Customer {
   phone_password_owner_fingerprint?: string | null;
   created_at: string;
   updated_at: string;
+  default_pickup_time?: string;
 }
+
+export interface CustomerData {
+  name: string;
+  phone: string;
+  address_type?: 'apartment' | 'house' | 'workplace' | 'custom';
+  address_label?: string;
+  street: string;
+  area: string;
+  city: string;
+  apartment?: string;
+  floor?: string;
+  building_number?: string;
+  house_name?: string;
+  company_name?: string;
+  landmark?: string;
+  latitude?: number;
+  longitude?: number;
+  deliveryMethod?: 'delivery' | 'pickup';
+  secondary_phone?: string;
+  default_pickup_time?: string;
+}
+
+export type AddressType = 'apartment' | 'house' | 'workplace' | 'custom';
+
+export type SavedAddressTab = {
+  id: string;
+  label: string;
+  data: Partial<CustomerData>;
+};
 
 export interface Order {
   id: string;
@@ -94,6 +138,12 @@ export interface Order {
   customer_address_label?: string;
   customer_house_name?: string;
   customer_company_name?: string;
+  pickup_deadline_at?: string | null;
+  pickup_deadline_updated_at?: string | null;
+  pickup_deadline_operator_seen?: boolean | null;
+  pickup_commitment_kind?: 'now' | 'hour' | 'custom' | null;
+  pickup_commitment_ack?: boolean | null;
+  pickup_commitment_label?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -106,6 +156,7 @@ export interface OrderItem {
   quantity: number;
   unit_price: number;
   subtotal: number;
+  rate_discount_percent?: number | null;
 }
 
 export interface CustomerNote {
@@ -152,9 +203,29 @@ export interface DeviceCoupon {
   created_at: string;
 }
 
+export interface CustomerSavedAddress {
+  id: string;
+  customer_id: string;
+  label: string;
+  address_type: 'apartment' | 'house' | 'workplace' | 'custom';
+  building_number?: string;
+  street: string;
+  area: string;
+  city: string;
+  floor?: string;
+  apartment?: string;
+  house_name?: string;
+  company_name?: string;
+  landmark?: string;
+  latitude?: number;
+  longitude?: number;
+  created_at: string;
+}
+
 export interface PolygonPoint {
   lat: number;
   lng: number;
+  label?: number;
 }
 
 export interface DeliveryZoneLayer {
@@ -187,6 +258,7 @@ export interface DeliveryZone {
   is_active: boolean;
   created_at: string;
   base_delivery_price?: number;
+  branch_location?: PolygonPoint | null;
   // Legacy fields (for migration compatibility)
   min_lat?: number;
   max_lat?: number;

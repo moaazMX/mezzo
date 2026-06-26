@@ -1,6 +1,6 @@
 import { supabase } from './supabase';
 import type { DeliveryService, DeliveryZone, DeliveryZoneLayer } from './supabase';
-import { isPointInPolygon } from './geoUtils';
+import { isPointInPolygon, approximatePolygonArea } from './geoUtils';
 
 export type DeliveryMatchResult = {
   isInGreen: boolean;
@@ -25,15 +25,54 @@ export function getDeliveryMatch(
   let bestLayerMatch: { service: DeliveryService; layer: DeliveryZoneLayer; price: number; order: number } | null = null;
   let matchedGreenZone: DeliveryZone | undefined;
 
-  if (zones && zones.length > 0) {
-    for (const zone of zones) {
-      if (!zone.is_active) continue;
-      if (zone.polygon_points && zone.polygon_points.length >= 3) {
-        if (isPointInPolygon(point, zone.polygon_points)) {
-          matchedGreenZone = zone;
-          break;
-        }
-      }
+  // Requirement: Disabled zones (is_active === false) act as "blockers".
+  // If a point is inside an inactive zone, it counts as "outside".
+  const inactiveZones = (zones || []).filter((z) => z.is_active === false);
+  const isBlocked = inactiveZones.some(
+    (zone) =>
+      zone.polygon_points &&
+      zone.polygon_points.length >= 3 &&
+      isPointInPolygon(point, zone.polygon_points)
+  );
+
+  if (isBlocked) {
+    return {
+      isInGreen: false,
+      isInYellow: false,
+      price: 0
+    };
+  }
+
+  // Only active order zones count (inactive zones are blockers only)
+  const activeZones = (zones || []).filter((z) => z.is_active !== false);
+  const hasActiveOrderZones = activeZones.length > 0;
+  const hasPricingLayers =
+    (services || []).some(
+      (s) =>
+        s.is_active &&
+        (s.layers || []).some((l) => l.polygon_points && l.polygon_points.length >= 3)
+    );
+
+  if (activeZones.length > 0) {
+    const matchingActive = activeZones.filter(
+      (zone) =>
+        zone.polygon_points &&
+        zone.polygon_points.length >= 3 &&
+        isPointInPolygon(point, zone.polygon_points)
+    );
+    if (matchingActive.length > 0) {
+      // Requirement: If multiple active zones overlap, pick the one with the highest price.
+      // If prices are equal, fallback to smallest area (most specific).
+      matchedGreenZone = matchingActive.reduce((best, zone) => {
+        const price = Number(zone.base_delivery_price || 0);
+        const bestPrice = Number(best.base_delivery_price || 0);
+        if (price > bestPrice) return zone;
+        if (price < bestPrice) return best;
+        
+        const area = approximatePolygonArea(zone.polygon_points!);
+        const bestArea = approximatePolygonArea(best.polygon_points!);
+        return area < bestArea ? zone : best;
+      });
     }
   }
 
@@ -55,6 +94,8 @@ export function getDeliveryMatch(
     });
   }
 
+  const layersDisabled = services.length === 0 || services.every(s => !s.layers || s.layers.length === 0);
+
   if (isInYellow && bestLayerMatch) {
     const match = bestLayerMatch as { service: DeliveryService; layer: DeliveryZoneLayer; price: number; order: number };
     return {
@@ -67,12 +108,53 @@ export function getDeliveryMatch(
     };
   }
 
-  if (matchedGreenZone) {
+  if (matchedGreenZone && hasActiveOrderZones) {
+    // If layers are disabled, delivery is free even inside a green zone
+    if (layersDisabled) {
+      return {
+        isInGreen: true,
+        isInYellow: false,
+        price: 0,
+        activeZone: matchedGreenZone
+      };
+    }
     return {
       isInGreen: true,
       isInYellow: false,
       price: Number(matchedGreenZone.base_delivery_price || 0),
       activeZone: matchedGreenZone
+    };
+  }
+
+  // No active order zones: pricing is layer-based only (blocker zones may still exist)
+  if (!hasActiveOrderZones) {
+    if (layersDisabled) {
+      return {
+        isInGreen: true,
+        isInYellow: false,
+        price: 0
+      };
+    }
+    if (hasPricingLayers) {
+      return {
+        isInGreen: false,
+        isInYellow: false,
+        price: 0
+      };
+    }
+    return {
+      isInGreen: true,
+      isInYellow: false,
+      price: 0
+    };
+  }
+
+  // Legacy: active order zones exist but point is outside layers and green zones
+  if (layersDisabled) {
+    return {
+      isInGreen: true,
+      isInYellow: false,
+      price: 0
     };
   }
 
@@ -90,8 +172,7 @@ export async function fetchDeliveryZonesAndServices(): Promise<{
 }> {
   const { data: rawZones, error: zoneError } = await supabase
     .from('delivery_zones')
-    .select('*')
-    .eq('is_active', true);
+    .select('*');
 
   if (zoneError) {
     console.error('fetchDeliveryZonesAndServices zones:', zoneError);

@@ -1,6 +1,8 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { LogOut, Package, ShoppingBag, BarChart3, Settings, List } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { RealtimeProvider } from '../contexts/RealtimeContext';
+import RealtimeIndicator from './RealtimeIndicator';
 import OrdersManagement, { OrdersManagementHandle } from './operator/OrdersManagement';
 import ItemsManagement from './operator/ItemsManagement';
 import Analytics from './operator/Analytics';
@@ -11,7 +13,7 @@ type Tab = 'orders' | 'items' | 'analytics' | 'settings';
 export default function OperatorDashboard() {
   const { logout } = useAuth();
   const ordersRef = useRef<OrdersManagementHandle>(null);
-  const [activeTab, setActiveTab] = useState<Tab>('orders');
+  const [activeTab, setActiveTab] = useState<Tab>('settings');
   const [focusCustomerPhone, setFocusCustomerPhone] = useState<string | null>(null);
   const [focusCustomerNonce, setFocusCustomerNonce] = useState(0);
 
@@ -46,6 +48,7 @@ export default function OperatorDashboard() {
   ];
 
   return (
+    <RealtimeProvider>
     <div className="min-h-screen bg-dark">
       <header className="bg-dark/80 backdrop-blur-sm border-b-2 border-primary sticky top-0 z-40 shadow-xl">
         <div className="container mx-auto px-4 py-4">
@@ -63,7 +66,7 @@ export default function OperatorDashboard() {
               لوحة التحكم
             </h1>
 
-            <div className="w-24 shrink-0" aria-hidden />
+            <RealtimeIndicator label="مباشر" className="shrink-0" />
           </div>
         </div>
       </header>
@@ -106,5 +109,6 @@ export default function OperatorDashboard() {
         </div>
       </div>
     </div>
+    </RealtimeProvider>
   );
 }

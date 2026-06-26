@@ -14,7 +14,7 @@ export default function CategorySection({ category, items, onAddToCart }: Catego
   const subtitle = language === 'ar' ? category.name_en : category.name;
 
   return (
-    <section className="mb-10 scroll-mt-24" id={`category-${category.id}`}>
+    <section className="mx-menu-section mb-10 scroll-mt-24" id={`category-${category.id}`}>
       <header className="mb-4 text-right">
         <h2 className="text-lg font-black text-white sm:text-xl">{title}</h2>
         {subtitle && subtitle !== title && (

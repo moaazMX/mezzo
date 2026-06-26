@@ -4,6 +4,8 @@ import { Category } from '../lib/supabase';
 import { useLanguage } from '../contexts/LanguageContext';
 import '@fontsource/press-start-2p';
 import { supabase } from '../lib/supabase';
+import { useRealtimeRefetch } from '../hooks/useRealtimeSubscription';
+import RealtimeIndicator from './RealtimeIndicator';
 
 interface HeaderProps {
   cartCount: number;
@@ -50,14 +52,19 @@ export default function Header({ cartCount, onCartClick, onProfileClick, hasOrde
     return () => clearInterval(interval);
   }, []);
 
+  const loadOperatorLogo = async () => {
+    const { data } = await supabase.from('settings').select('value').eq('key', 'logo_image_url').maybeSingle();
+    const url = typeof data?.value === 'string' ? data.value.trim() : '';
+    if (url) setLogoImageUrl(url);
+  };
+
   useEffect(() => {
-    const loadOperatorLogo = async () => {
-      const { data } = await supabase.from('settings').select('value').eq('key', 'logo_image_url').maybeSingle();
-      const url = typeof data?.value === 'string' ? data.value.trim() : '';
-      if (url) setLogoImageUrl(url);
-    };
     void loadOperatorLogo();
   }, []);
+
+  useRealtimeRefetch('header-settings', ['settings'], () => {
+    void loadOperatorLogo();
+  });
 
   const handleLogoClick = () => {
     setIsLogoClicked(true);
@@ -137,7 +144,7 @@ export default function Header({ cartCount, onCartClick, onProfileClick, hasOrde
                   )}
                 </button>
               </div>
-              <div className="w-10 md:w-32" />
+              <RealtimeIndicator className="hidden md:inline-flex" showDot={false} />
             </div>
 
             <button

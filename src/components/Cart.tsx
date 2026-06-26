@@ -1,11 +1,16 @@
-import { ChevronRight, Minus, Package, Plus, ShoppingBag, Trash2 } from 'lucide-react';
+import { ChevronRight, Minus, Package, Plus, ShoppingBag, Trash2, X } from 'lucide-react';
 import { Item } from '../lib/supabase';
 import { useLanguage } from '../contexts/LanguageContext';
 import { ReactNode, useEffect, useRef, useCallback, useState } from 'react';
 import { isTouchPhoneChrome } from '../lib/viewportUi';
+import ProgressiveImage from './ProgressiveImage';
 
 interface CartItem extends Item {
   quantity: number;
+  /** True when the item was found unavailable during a cart sync pass */
+  cart_synced_unavailable?: boolean;
+  /** True when the item's data (price, name, etc.) changed during a cart sync pass */
+  cart_synced_data_changed?: boolean;
 }
 
 interface CartProps {
@@ -27,6 +32,11 @@ interface CartProps {
   onSaveCheckoutCartEdit?: () => void;
   onCancelCheckoutCartEdit?: () => void;
   onCheckoutHandleBack?: () => void;
+  isHidden?: boolean;
+  editingOrder?: any;
+  onSaveOrderEdit?: () => void;
+  onCancelOrderEdit?: () => void;
+  onAcknowledgeUpdate?: (itemId: string) => void;
 }
 
 export default function Cart({
@@ -47,7 +57,12 @@ export default function Cart({
   checkoutCartEditMode = false,
   onSaveCheckoutCartEdit,
   onCancelCheckoutCartEdit,
-  onCheckoutHandleBack
+  onCheckoutHandleBack,
+  isHidden = false,
+  editingOrder = null,
+  onSaveOrderEdit,
+  onCancelOrderEdit,
+  onAcknowledgeUpdate
 }: CartProps) {
   const { language, t } = useLanguage();
   const currencySymbol = language === 'ar' ? 'ج' : 'EG';
@@ -58,7 +73,7 @@ export default function Cart({
   const isDraggingRef = useRef(false);
   const currentSnapRef = useRef(0);
   const hideAfterOffscreenTimeoutRef = useRef<number | null>(null);
-  const [sheetState, setSheetState] = useState<'offscreen' | 'mini' | 'half' | 'full'>('mini');
+  const [sheetState, setSheetState] = useState<'offscreen' | 'mini' | 'full'>('offscreen');
   const [phoneChrome, setPhoneChrome] = useState<boolean>(() => isTouchPhoneChrome());
 
   const startYRef = useRef(0);
@@ -94,14 +109,15 @@ export default function Cart({
   const getSnaps = useCallback(() => {
     const vh = window.innerHeight;
     const fullH = isTouchPhoneChrome() ? vh : vh * 0.92;
+    // On mobile, increase mini snap so the handle stays above the bottom nav
+    const navH = phoneChrome ? 74 : 0; 
     return {
       offscreen: fullH + 50,
-      mini: fullH - 75,
-      half: fullH * 0.45,
+      mini: fullH - (75 + navH),
       full: 0,
       fullH
     };
-  }, []);
+  }, [phoneChrome]);
 
   const setTranslate = useCallback((ty: number, animated = false) => {
     if (!sheetRef.current) return;
@@ -125,12 +141,10 @@ export default function Cart({
     const snaps = getSnaps();
     const state = ty >= snaps.offscreen - 10
       ? 'offscreen'
-      : ty === snaps.full
+      : ty <= snaps.mini / 2
         ? 'full'
-        : ty <= snaps.half + 10
-          ? 'half'
-          : 'mini';
-    setSheetState(state as 'offscreen' | 'mini' | 'half' | 'full');
+        : 'mini';
+    setSheetState(state as 'offscreen' | 'mini' | 'full');
     sheet.setAttribute('data-state', state);
 
     // When going fully offscreen, hide only after the slide-down completes
@@ -146,13 +160,14 @@ export default function Cart({
       }, 420);
     }
 
-    const footerTy = Math.min(ty, snaps.half);
-    sheet.style.setProperty('--footer-ty', `${footerTy}`);
-
-    const contentOpacity = ty >= snaps.mini - 10 ? 0 : 1;
+    const showFooter = state === 'full' && !showCheckoutPanel;
+    sheet.style.setProperty('--sheet-footer-opacity', showFooter ? '1' : '0');
+    sheet.style.setProperty('--sheet-footer-events', showFooter ? 'auto' : 'none');
+    sheet.style.setProperty('--sheet-footer-shift', showFooter ? '0%' : '110%');
+    const contentOpacity = state === 'full' ? 1 : 0;
     sheet.style.setProperty('--content-opacity', `${contentOpacity}`);
     sheet.style.setProperty('--content-events', contentOpacity === 0 ? 'none' : 'auto');
-  }, [getSnaps]);
+  }, [getSnaps, showCheckoutPanel]);
 
   useEffect(() => {
     return () => {
@@ -178,7 +193,7 @@ export default function Cart({
   useEffect(() => {
     const lockPage = phoneChrome
       ? showCheckoutPanel
-      : (showCheckoutPanel && (sheetState === 'full' || sheetState === 'half'));
+      : (showCheckoutPanel && sheetState === 'full');
     if (!lockPage) return;
     const onWheel = (e: WheelEvent) => {
       const target = e.target as HTMLElement | null;
@@ -202,20 +217,14 @@ export default function Cart({
     const snaps = getSnaps();
     const biased = ty + vel * 60; // Reduced bias for more control
 
-    const baseSnap = snaps.mini;
-    const candidates = [baseSnap, snaps.half, snaps.full];
+    const candidates = [snaps.mini, snaps.full];
+    if (vel < -4) return snaps.full;
+    if (vel > 4) return snaps.mini;
 
-    // Priority: if swiping up fast from half, go to full
-    if (vel < -4 && ty < snaps.half + 80) return snaps.full;
-    // If swiping down fast from half, go to mini/offscreen
-    if (vel > 4 && ty > snaps.half - 80) return baseSnap;
-
-    const nearest = candidates.reduce((a, b) =>
+    return candidates.reduce((a, b) =>
       Math.abs(b - biased) < Math.abs(a - biased) ? b : a
     );
-
-    return nearest;
-  }, [getSnaps, cartItems.length]);
+  }, [getSnaps]);
 
   const onStart = useCallback((e: TouchEvent | MouseEvent | React.TouchEvent | React.MouseEvent) => {
     if (!isTouchPhoneChrome()) return; // Disable drag on desktop / narrow non-touch
@@ -290,13 +299,11 @@ export default function Cart({
 
     let ty = startTYRef.current + (pt.clientY - startYRef.current);
     const snaps = getSnaps();
-    const baseSnap = snaps.mini;
-
-    ty = Math.max(-10, Math.min(baseSnap + 20, ty));
+    ty = Math.max(-10, Math.min(snaps.mini + 20, ty));
     if (ty < 0) ty *= 0.3;
 
     setTranslate(ty, false);
-  }, [getSnaps, setTranslate, cartItems.length]);
+  }, [getSnaps, setTranslate]);
 
   const onEnd = useCallback(() => {
     gestureFromContentRef.current = false;
@@ -318,7 +325,7 @@ export default function Cart({
     const stop = nearestSnap(currentTY, velYRef.current);
     snapTo(stop, true);
 
-    if (stop === snaps.full || stop === snaps.half) {
+    if (stop === snaps.full) {
       if (!callbacksRef.current.isOpen) {
         callbacksRef.current.onHandleClick();
       }
@@ -348,24 +355,27 @@ export default function Cart({
     const snaps = getSnaps();
     if (isOpen) {
       snapTo(snaps.full, true);
-    } else if (hasItems && !showCheckoutPanel) {
+    } else if (showCheckoutPanel) {
+      snapTo(snaps.full, true);
+    } else if (hasItems && !isHidden) {
       snapTo(snaps.mini, true);
     } else {
       const target = snaps.offscreen;
       snapTo(target, true);
     }
-  }, [isOpen, hasItems, showCheckoutPanel, getSnaps, snapTo]);
+  }, [isOpen, hasItems, showCheckoutPanel, getSnaps, snapTo, isHidden]);
 
   useEffect(() => {
     const snaps = getSnaps();
     if (isOpen) {
-      if (currentSnapRef.current !== snaps.full && currentSnapRef.current !== snaps.half) {
-        snapTo(snaps.half, true);
+      if (currentSnapRef.current !== snaps.full) {
+        snapTo(snaps.full, true);
       }
-    } else if (hasItems && !showCheckoutPanel) {
-      const target = snaps.mini;
-      if (currentSnapRef.current !== target) {
-        snapTo(target, true);
+    } else if (showCheckoutPanel) {
+      if (currentSnapRef.current !== snaps.full) snapTo(snaps.full, true);
+    } else if (hasItems && !isHidden) {
+      if (currentSnapRef.current !== snaps.mini) {
+        snapTo(snaps.mini, true);
       }
     } else {
       const target = snaps.offscreen;
@@ -373,7 +383,7 @@ export default function Cart({
         snapTo(target, true);
       }
     }
-  }, [isOpen, hasItems, showCheckoutPanel, getSnaps, snapTo, cartItems.length]);
+  }, [isOpen, hasItems, showCheckoutPanel, getSnaps, snapTo, cartItems.length, isHidden]);
 
   useEffect(() => {
     if (showCheckoutPanel) return;
@@ -384,36 +394,34 @@ export default function Cart({
     if (callbacksRef.current.isOpen) callbacksRef.current.onClose();
   }, [cartItems.length, showCheckoutPanel, getSnaps, snapTo]);
 
-  // Keep sheet snap stable on viewport resize (prevents half-open glitch).
+  // Keep sheet snap stable on viewport resize.
   useEffect(() => {
     const onResize = () => {
       const snaps = getSnaps();
       if (callbacksRef.current.isOpen) {
         snapTo(snaps.full, false);
-      } else if (hasItems && !showCheckoutPanel) {
-        // Mobile: keep collapsed cart visible only when it has items
+      } else if (showCheckoutPanel) {
+        snapTo(snaps.full, false);
+      } else if (hasItems && !isHidden) {
         snapTo(snaps.mini, false);
       } else {
-        // Ensure cart stays fully hidden after close when empty
         snapTo(snaps.offscreen, false);
       }
     };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
-  }, [getSnaps, snapTo, hasItems, showCheckoutPanel]);
+  }, [getSnaps, snapTo, hasItems, showCheckoutPanel, isHidden]);
 
-  // PC: If user scrolls down while in half/mini state, expand to full
+  // Desktop: while collapsed, wheel down can expand to full.
   useEffect(() => {
     const sheet = sheetRef.current;
     if (!sheet) return;
 
     const handleWheel = (e: WheelEvent) => {
       if (!isTouchPhoneChrome() && currentSnapRef.current > 0 && e.deltaY > 0) {
-        if (cartItems.length > 3) { // Only if there are enough items to justify expanding
-          snapTo(getSnaps().full);
-          e.preventDefault(); // Prevent page scroll
-          return;
-        }
+        snapTo(getSnaps().full);
+        e.preventDefault();
+        return;
       }
     };
 
@@ -425,14 +433,16 @@ export default function Cart({
 
   return (
     <>
+      {/* Invisible click-blocker during checkout (no dimming) */}
       <div
-        className={`fixed inset-0 z-[39] bg-black/0 transition-colors duration-300 pointer-events-none ${
-          showCheckoutPanel && (sheetState === 'full' || sheetState === 'half') ? '!bg-black/30 !pointer-events-auto' : ''
+        className={`fixed inset-0 z-[80] bg-transparent ${
+          showCheckoutPanel ? 'pointer-events-auto' : 'pointer-events-none'
         }`}
+        aria-hidden="true"
       />
       <div
         ref={sheetRef}
-        className={`cart-sheet ${phoneChrome ? 'cart-sheet--phone-chrome' : ''} ${showCheckoutPanel ? 'show-checkout-panel' : ''} ${showCheckoutPanel && checkoutStep === 'address' ? 'checkout-confirm-mode' : ''}`}
+        className={`cart-sheet ${phoneChrome ? 'cart-sheet--phone-chrome' : ''} ${showCheckoutPanel ? 'show-checkout-panel' : ''} ${showCheckoutPanel && checkoutStep === 'address' ? 'checkout-confirm-mode' : ''} ${showCheckoutPanel && phoneChrome ? 'mobile-checkout-fullscreen' : ''}`}
         id="cart-bottom-sheet"
         style={{ display: isCheckoutOpen ? 'none' : 'block' }}
       >
@@ -447,12 +457,12 @@ export default function Cart({
             onClick={(e) => {
               e.stopPropagation();
               if (showCheckoutPanel) return;
-              if (currentSnapRef.current !== getSnaps().full && currentSnapRef.current !== getSnaps().half) {
-                snapTo(getSnaps().half, true);
+              if (currentSnapRef.current !== getSnaps().full) {
+                snapTo(getSnaps().full, true);
                 callbacksRef.current.onHandleClick();
               } else {
                 const snaps = getSnaps();
-                const target = snaps.mini;
+                const target = hasItems && !isHidden && !showCheckoutPanel ? snaps.mini : snaps.offscreen;
                 snapTo(target, true);
                 callbacksRef.current.onClose();
               }
@@ -460,13 +470,13 @@ export default function Cart({
           >
             <div className="handle-bar"></div>
 
-            <div className="relative mt-1 flex w-full min-h-[1.75rem] items-center justify-center px-6">
+            <div className="relative mt-1 flex h-9 w-full items-center justify-center px-6 isolate">
               {showCheckoutPanel && (
                 <button
                   type="button"
                   data-no-drag="1"
                   aria-label={language === 'ar' ? 'رجوع' : 'Back'}
-                  className="absolute right-3 top-1/2 z-10 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg border border-white/20 bg-black/35 text-white shadow-sm backdrop-blur-sm transition-colors hover:bg-black/45 active:scale-95"
+                  className="absolute right-3 top-0 bottom-0 my-auto z-10 flex h-9 w-9 pointer-events-auto items-center justify-center rounded-lg border border-white/20 bg-black/35 text-white shadow-sm backdrop-blur-sm transition-colors hover:bg-black/45 focus:outline-none active:bg-black/35"
                   onClick={(e) => {
                     e.stopPropagation();
                     onCheckoutHandleBack?.();
@@ -497,7 +507,9 @@ export default function Cart({
             <div className="flex justify-between items-center px-4 mb-4 mt-2">
               <h2 className="text-xl text-white font-black flex items-center gap-2">
                 <ShoppingBag className="w-6 h-6" />
-                {t('cart.title')}
+                {editingOrder 
+                  ? (language === 'ar' ? `تعديل طلب #${editingOrder.order_number}` : `Edit Order #${editingOrder.order_number}`)
+                  : t('cart.title')}
               </h2>
               {cartItems.length > 0 && (
                 <button
@@ -525,70 +537,97 @@ export default function Cart({
                 const price = item.has_offer && item.offer_price ? item.offer_price : item.price;
                 const subtotal = price * item.quantity;
 
+                const originalItem = editingOrder?.items?.find((oi: any) => oi.item_id === item.id);
+                const isOriginal = !!originalItem;
+                const originalQty = originalItem ? originalItem.quantity : 0;
+                const isPreparing = editingOrder?.status === 'preparing';
+                const disableRemove = isOriginal && isPreparing;
+                const disableDecrease = item.quantity <= 1 || (isOriginal && isPreparing && item.quantity <= originalQty);
+
                 return (
-                  <div key={item.id} id={`cart-item-${item.id}`} className="cart-item-card">
-                    <div className="w-14 h-14 rounded-lg overflow-hidden border border-primary/20 flex-shrink-0">
-                      {item.image_url ? (
-                        <img
-                          src={item.image_url}
-                          alt={language === 'ar' ? item.name : item.name_en}
-                          loading="lazy"
-                          decoding="async"
-                          onLoad={(e) => e.currentTarget.classList.add('is-loaded')}
-                          className="w-full h-full object-cover img-fade"
-                        />
-                      ) : (
-                        <div className="w-full h-full flex items-center justify-center bg-dark text-xs text-muted font-black">MX</div>
-                      )}
-                    </div>
-                    <div className="flex-1 text-right">
-                      <h3 className="text-white font-bold text-sm leading-tight">
-                        {language === 'ar' ? item.name : item.name_en}
-                      </h3>
-                      <p className="text-muted text-xs">
-                        {language === 'ar' ? item.name_en : item.name}
-                      </p>
-                      <div className="flex items-center justify-end gap-2 mt-1">
-                        <span className="text-primary font-bold text-xs">
-                          {price} {currencySymbol}
-                        </span>
-                        {item.has_offer && item.offer_price && (
-                          <span className="text-muted/60 line-through text-[10px]">
-                            {item.price} {currencySymbol}
-                          </span>
+                  <div key={item.id} id={`cart-item-${item.id}`} className="cart-item-card flex-col gap-0">
+                    {/* Status banners inside the card */}
+                    {item.cart_synced_unavailable && (
+                      <div className="w-full flex items-center justify-between bg-red-600/20 border border-red-500/40 rounded-lg px-3 py-1.5 mb-2">
+                        <span className="text-red-400 text-[11px] font-black">{language === 'ar' ? 'هذا الصنف لم يعد متوفراً، يرجى إزالته' : 'Item no longer available — please remove'}</span>
+                      </div>
+                    )}
+                    {item.cart_synced_data_changed && !item.cart_synced_unavailable && (
+                      <div className="w-full flex items-center justify-between bg-yellow-500/15 border border-yellow-500/40 rounded-lg px-3 py-1.5 mb-2">
+                        <span className="text-yellow-400 text-[11px] font-black">{language === 'ar' ? 'تم تحديث بيانات هذا الصنف' : 'Item data was updated'}</span>
+                        <button onClick={(e) => { e.stopPropagation(); onAcknowledgeUpdate?.(item.id); }} className="text-yellow-400 hover:text-yellow-200 transition-colors p-0.5">
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Main item row */}
+                    <div className="flex items-center gap-3 w-full">
+                      <div className="w-14 h-14 rounded-lg overflow-hidden border border-primary/20 flex-shrink-0">
+                        {item.image_url ? (
+                          <ProgressiveImage
+                            src={item.image_url}
+                            alt={language === 'ar' ? item.name : item.name_en}
+                            preset="thumb"
+                            wrapperClassName="w-full h-full"
+                            className={`w-full h-full object-cover ${item.cart_synced_unavailable ? 'grayscale opacity-50' : ''}`}
+                          />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center bg-dark text-xs text-muted font-black">MX</div>
                         )}
                       </div>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => onRemoveItem(item.id)}
-                        className="bg-red-600/80 hover:bg-red-500 p-1.5 rounded-lg transition-colors"
-                      >
-                        <Trash2 className="w-3.5 h-3.5 text-white" />
-                      </button>
-
-                      <div className="flex items-center gap-1 bg-dark rounded-lg p-0.5">
-                        <button
-                          onClick={() => onUpdateQuantity(item.id, item.quantity + 1)}
-                          className="bg-primary hover:bg-primary/80 p-1 rounded transition-colors"
-                        >
-                          <Plus className="w-3.5 h-3.5 text-white" />
-                        </button>
-                        <span className="text-white font-bold w-5 text-center text-sm">
-                          {item.quantity}
-                        </span>
-                        <button
-                          onClick={() => onUpdateQuantity(item.id, item.quantity - 1)}
-                          className="bg-primary hover:bg-primary/80 p-1 rounded transition-colors disabled:bg-dark/60"
-                          disabled={item.quantity <= 1}
-                        >
-                          <Minus className="w-3.5 h-3.5 text-white" />
-                        </button>
+                      <div className="flex-1 text-right">
+                        <h3 className={`font-bold text-sm leading-tight ${item.cart_synced_unavailable ? 'text-white/50 line-through' : 'text-white'}`}>
+                          {language === 'ar' ? item.name : item.name_en}
+                        </h3>
+                        <p className="text-muted text-xs">
+                          {language === 'ar' ? item.name_en : item.name}
+                        </p>
+                        <div className="flex items-center justify-end gap-2 mt-1">
+                          <span className="text-primary font-bold text-xs">
+                            {price} {currencySymbol}
+                          </span>
+                          {item.has_offer && item.offer_price && (
+                            <span className="text-muted/60 line-through text-[10px]">
+                              {item.price} {currencySymbol}
+                            </span>
+                          )}
+                        </div>
                       </div>
 
-                      <div className="text-primary font-black text-sm w-16 text-right">
-                        {subtotal} {currencySymbol}
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => onRemoveItem(item.id)}
+                          disabled={disableRemove}
+                          className="bg-red-600/80 hover:bg-red-500 p-1.5 rounded-lg transition-colors disabled:opacity-40 disabled:hover:bg-red-600/80 disabled:cursor-not-allowed"
+                        >
+                          <Trash2 className="w-3.5 h-3.5 text-white" />
+                        </button>
+
+                        {!item.cart_synced_unavailable && (
+                          <div className="flex items-center gap-1 bg-dark rounded-lg p-0.5">
+                            <button
+                              onClick={() => onUpdateQuantity(item.id, item.quantity + 1)}
+                              className="bg-primary hover:bg-primary/80 p-1 rounded transition-colors"
+                            >
+                              <Plus className="w-3.5 h-3.5 text-white" />
+                            </button>
+                            <span className="text-white font-bold w-5 text-center text-sm">
+                              {item.quantity}
+                            </span>
+                            <button
+                              onClick={() => onUpdateQuantity(item.id, item.quantity - 1)}
+                              className="bg-primary hover:bg-primary/80 p-1 rounded transition-colors disabled:bg-dark/60 disabled:cursor-not-allowed"
+                              disabled={disableDecrease}
+                            >
+                              <Minus className="w-3.5 h-3.5 text-white" />
+                            </button>
+                          </div>
+                        )}
+
+                        <div className="text-primary font-black text-sm w-16 text-right">
+                          {subtotal} {currencySymbol}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -610,13 +649,12 @@ export default function Cart({
                     >
                       <div className="flex items-center gap-2">
                         {suggested.image_url ? (
-                          <img
+                          <ProgressiveImage
                             src={suggested.image_url}
                             alt={suggested.name}
-                            loading="lazy"
-                            decoding="async"
-                            onLoad={(e) => e.currentTarget.classList.add('is-loaded')}
-                            className="w-10 h-10 rounded-md object-cover img-fade"
+                            preset="thumb"
+                            wrapperClassName="w-10 h-10 shrink-0"
+                            className="w-full h-full rounded-md object-cover"
                           />
                         ) : (
                           <div className="w-10 h-10 rounded-md bg-surface flex items-center justify-center text-[10px] text-muted">MX</div>
@@ -648,14 +686,34 @@ export default function Cart({
             </div>
             )}
             {!showCheckoutPanel && !checkoutCartEditMode && (
-              <button
-                onClick={onCheckout}
-                type="button"
-                disabled={cartItems.length === 0}
-                className="w-full bg-primary hover:bg-primary/80 text-white py-2.5 rounded-xl font-black text-lg transition-all transform hover:scale-[1.02] shadow-lg"
-              >
-                {t('cart.checkout')}
-              </button>
+              editingOrder ? (
+                <div className="flex gap-2 w-full">
+                  <button
+                    onClick={onCancelOrderEdit}
+                    type="button"
+                    className="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-2.5 rounded-xl font-black text-sm transition-all"
+                  >
+                    {language === 'ar' ? 'إلغاء التعديل' : 'Cancel Edit'}
+                  </button>
+                  <button
+                    onClick={onSaveOrderEdit}
+                    type="button"
+                    disabled={cartItems.length === 0}
+                    className="flex-1 bg-green-600 hover:bg-green-500 text-white py-2.5 rounded-xl font-black text-sm transition-all shadow-lg"
+                  >
+                    {language === 'ar' ? 'حفظ التعديلات' : 'Save Changes'}
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={onCheckout}
+                  type="button"
+                  disabled={cartItems.length === 0}
+                  className="w-full bg-primary hover:bg-primary/80 text-white py-2.5 rounded-xl font-black text-lg transition-all transform hover:scale-[1.02] shadow-lg"
+                >
+                  {t('cart.checkout')}
+                </button>
+              )
             )}
             {!showCheckoutPanel && checkoutCartEditMode && (
               <div className="space-y-2">
@@ -693,7 +751,7 @@ export default function Cart({
           bottom: 0;
           width: min(100vw, 430px);
           height: 92vh;
-          z-index: 55;
+          z-index: 90;
           will-change: transform, opacity;
           touch-action: none;
           transform: translateY(calc(var(--ty, 1000) * 1px));
@@ -705,15 +763,36 @@ export default function Cart({
           transition: transform 0.34s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.24s ease-out;
         }
 
+        @media (max-width: 768px) {
+          .cart-sheet--phone-chrome {
+            bottom: 0 !important;
+            height: 100vh;
+            height: 100dvh;
+          }
+        }
+
         @media (min-width: 769px) {
           .cart-sheet[data-state="full"] {
             width: 700px;
             margin-left: -350px;
           }
+          .cart-sheet.desktop-checkout-fullscreen[data-state="full"] {
+            width: 100vw;
+            height: 100vh;
+            margin-left: -50vw;
+          }
+          .cart-sheet.desktop-checkout-fullscreen .cart-sheet-inner {
+            border-radius: 0;
+          }
           .cart-sheet.checkout-confirm-mode[data-state="full"] {
             width: 820px;
             margin-left: -410px;
             height: 96vh;
+          }
+          .cart-sheet.desktop-checkout-fullscreen.checkout-confirm-mode[data-state="full"] {
+            width: 100vw;
+            height: 100vh;
+            margin-left: -50vw;
           }
         }
         .cart-sheet[data-state="offscreen"] { pointer-events: none; }
@@ -724,7 +803,7 @@ export default function Cart({
           height: 100%;
           background: hsl(var(--color-surface));
           border-radius: 24px 24px 0 0;
-          box-shadow: 0 -8px 40px rgba(0,0,0,0.25), 0 -1px 0 rgba(124,58,237,0.3);
+          box-shadow: 0 -1px 0 rgba(124,58,237,0.3);
           pointer-events: auto;
           display: flex;
           flex-direction: column;
@@ -769,7 +848,8 @@ export default function Cart({
           width: 44px; height: 5px;
           background: rgba(255,255,255,0.18);
           border-radius: 3px;
-          transition: background 0.2s, width 0.2s;
+          pointer-events: none;
+          transition: background 0.2s, width 0.2s, opacity 0.28s ease, transform 0.28s ease;
         }
         .cart-sheet.dragging .handle-bar {
           background: #7c3aed;
@@ -778,14 +858,32 @@ export default function Cart({
 
         .handle-summary {
           transition: opacity 0.22s ease-out, transform 0.22s ease-out;
-          opacity: var(--footer-opacity, 1);
+          opacity: 1;
         }
-        /* أثناء الشيك أوت: إخفاء الملخص عندما تكون القائمة مفتوحة (half/full)، وإظهاره في حالة mini */
-        .cart-sheet.show-checkout-panel[data-state="full"] .handle-summary,
-        .cart-sheet.show-checkout-panel[data-state="half"] .handle-summary {
+        .cart-sheet.show-checkout-panel[data-state="full"] .handle-summary {
           opacity: 0;
           transform: translateY(-4px);
           pointer-events: none;
+        }
+        .cart-sheet.desktop-checkout-fullscreen .handle-bar {
+          opacity: 0;
+          transform: translateY(-2px);
+        }
+        .cart-sheet.mobile-checkout-fullscreen .handle-bar {
+          opacity: 0;
+          transform: translateY(-2px);
+        }
+        .cart-sheet.mobile-checkout-fullscreen .cart-sheet-inner {
+          border-radius: 0;
+        }
+        .cart-sheet.mobile-checkout-fullscreen {
+          width: 100vw;
+          height: 100vh;
+          height: 100dvh;
+          margin-left: -50vw;
+        }
+        .cart-sheet.desktop-checkout-fullscreen .handle-area {
+          cursor: default;
         }
         .sheet-content {
           padding: 6px 0 120px;
@@ -831,14 +929,17 @@ export default function Cart({
         .sheet-footer {
           position: absolute;
           left: 0; right: 0; bottom: 0;
-          background: color-mix(in srgb, hsl(var(--color-surface)) 94%, black 6%);
-          backdrop-filter: blur(10px);
+          background: hsl(var(--color-surface));
+
           border-top: 1px solid rgba(124,58,237,0.3);
           padding: 16px;
           z-index: 20;
           border-radius: 0 0 24px 24px;
           
-          transform: translateY(calc(var(--footer-ty, 0) * -1px));
+          transform: translateY(var(--sheet-footer-shift, 110%));
+          opacity: var(--sheet-footer-opacity, 0);
+          pointer-events: var(--sheet-footer-events, none);
+          transition: transform 0.22s ease, opacity 0.2s ease;
         }
 
         /* Disable hover effects on touch devices (cart only) */

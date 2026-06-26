@@ -2,10 +2,11 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { LanguageProvider, useLanguage } from './contexts/LanguageContext';
 import { ThemeProvider } from './contexts/ThemeContext';
-import { supabase, Category, Item, DeviceCoupon, DeliveryService, DeliveryZoneLayer, PolygonPoint, Order, OrderItem } from './lib/supabase';
+import { supabase, Category, Item, DeviceCoupon, DeliveryService, DeliveryZoneLayer, PolygonPoint, Order, OrderItem, CustomerData } from './lib/supabase';
 import { fetchDeliveryZonesAndServices, getDeliveryMatch } from './lib/deliveryMatch';
 import { generateEasyRecoveryCode, hashPhonePassword, hashRecoveryCode } from './lib/phonePassword';
 import { getOrCreateDeviceFingerprint } from './lib/deviceFingerprint';
+import { findCustomerIdByPhone, findCustomerSummaryByPhone, ensureCustomerByPhone } from './lib/customerPhone';
 import {
   CheckCircle2, Navigation, MapPin, Lock,
   ChevronLeft, ChevronRight, Clock, Package, Truck,
@@ -15,12 +16,19 @@ import {
 import Header from './components/Header';
 import CategorySection from './components/CategorySection';
 import Cart from './components/Cart';
-import Checkout, { CustomerData } from './components/Checkout';
+import Checkout from './components/Checkout';
 import CustomerProfile from './components/CustomerProfile';
 import CheatCodeInput from './components/CheatCodeInput';
 import OperatorLogin from './components/OperatorLogin';
 import OperatorDashboard from './components/OperatorDashboard';
+import { RatePage } from './components/RateDashboard';
+import { RateAuthProvider } from './contexts/RateAuthContext';
+import { fetchRateSettings } from './lib/rateDiscount';
 import { isTouchPhoneChrome } from './lib/viewportUi';
+import { formatDeadline } from './lib/dateUtils';
+import { RealtimeProvider } from './contexts/RealtimeContext';
+import { useRealtimeRefetch } from './hooks/useRealtimeSubscription';
+import RealtimeIndicator from './components/RealtimeIndicator';
 
 function OperatorPage() {
   const { isOperator } = useAuth();
@@ -42,6 +50,8 @@ function OperatorPage() {
 
 interface CartItem extends Item {
   quantity: number;
+  cart_synced_unavailable?: boolean;
+  cart_synced_data_changed?: boolean;
 }
 
 interface PendingOrder extends Order {
@@ -54,12 +64,14 @@ function AppContent() {
   const [items, setItems] = useState<Item[]>([]);
   const [cartItems, setCartItems] = useState<CartItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const hasLoadedMenuRef = useRef(false);
   const [showCart, setShowCart] = useState(false);
   const [showCheckout, setShowCheckout] = useState(false);
   const [checkoutStep, setCheckoutStep] = useState<'customer' | 'address'>('customer');
   const [checkoutCartEditMode, setCheckoutCartEditMode] = useState(false);
   const [checkoutCartSnapshot, setCheckoutCartSnapshot] = useState<CartItem[] | null>(null);
   const [showProfile, setShowProfile] = useState(false);
+  const [editingOrder, setEditingOrder] = useState<any | null>(null);
   const [profileInitialTab, setProfileInitialTab] = useState<'settings' | 'orders'>('settings');
   const [customerPhone, setCustomerPhone] = useState('');
   const [couponSecretCode, setCouponSecretCode] = useState<string | null>(null);
@@ -67,11 +79,14 @@ function AppContent() {
   const [deviceCoupons, setDeviceCoupons] = useState<DeviceCoupon[]>([]);
   const [ordersCount, setOrdersCount] = useState(0);
   const [pendingOrders, setPendingOrders] = useState<PendingOrder[]>([]);
+  const [pickupNowMs, setPickupNowMs] = useState(() => Date.now());
   const [currentPendingOrderIndex, setCurrentPendingOrderIndex] = useState(0);
   const [touchStart, setTouchStart] = useState<number | null>(null);
   const [touchEnd, setTouchEnd] = useState<number | null>(null);
   const [phoneChrome, setPhoneChrome] = useState(false);
   const mobileKeyboardInputRef = useRef<HTMLInputElement>(null);
+  /** Prevents double-submit (rapid taps / Enter) creating duplicate orders. */
+  const orderConfirmInFlightRef = useRef(false);
   const [highlightOrderId, setHighlightOrderId] = useState<string | null>(null);
   const [orderSuccess, setOrderSuccess] = useState<{
     orderNumber: string;
@@ -89,8 +104,9 @@ function AppContent() {
   const [postOrderRecoveryCode, setPostOrderRecoveryCode] = useState<string | null>(null);
   const [showOptionalSecurity, setShowOptionalSecurity] = useState(false);
   const [activeBottomTab, setActiveBottomTab] = useState<'home' | 'orders' | 'account'>('home');
-  const [hideMobileBottomNav, setHideMobileBottomNav] = useState(false);
   const [isProductImageFullscreen, setIsProductImageFullscreen] = useState(false);
+  const [orderConfirmSubmitting, setOrderConfirmSubmitting] = useState(false);
+  const [profileSettingsView, setProfileSettingsView] = useState('main');
 
   useEffect(() => {
     try {
@@ -114,7 +130,10 @@ function AppContent() {
   }, [cartItems]);
 
   useEffect(() => {
-    const handler = (e: any) => setIsProductImageFullscreen(e.detail);
+    const handler = (e: any) => {
+      const isFullscreen = !!e.detail;
+      setIsProductImageFullscreen(isFullscreen);
+    };
     window.addEventListener('mobileFullscreenImage', handler);
     return () => window.removeEventListener('mobileFullscreenImage', handler);
   }, []);
@@ -122,34 +141,15 @@ function AppContent() {
   useEffect(() => {
     fetchData();
     fetchCouponConfigAndCoupons();
-
-    const categoriesChannel = supabase
-      .channel('categories-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'categories' }, () => {
-        fetchData();
-      })
-      .subscribe();
-
-    const itemsChannel = supabase
-      .channel('items-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'items' }, () => {
-        fetchData();
-      })
-      .subscribe();
-
-    const couponsChannel = supabase
-      .channel('device-coupons-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'device_coupons' }, () => {
-        fetchCouponConfigAndCoupons();
-      })
-      .subscribe();
-
-    return () => {
-      categoriesChannel.unsubscribe();
-      itemsChannel.unsubscribe();
-      couponsChannel.unsubscribe();
-    };
   }, []);
+
+  useRealtimeRefetch('app-menu', ['categories', 'items'], () => {
+    void fetchData(true);
+  });
+
+  useRealtimeRefetch('app-coupons-settings', ['device_coupons', 'settings'], () => {
+    void fetchCouponConfigAndCoupons();
+  });
 
   /** True phones only (coarse pointer + narrow) — not a desktop window resized small */
   useEffect(() => {
@@ -168,26 +168,13 @@ function AppContent() {
   const fetchPendingOrders = useCallback(async () => {
     let customerId: string | null = null;
     const phone = customerPhone || localStorage.getItem('customer_phone');
-    
+
     if (phone) {
       try {
-        const { data: customer } = await supabase
-          .from('customers')
-          .select('id')
-          .eq('phone', phone)
-          .maybeSingle();
-
-        if (customer?.id) {
-          customerId = customer.id;
-        }
+        customerId = await findCustomerIdByPhone(phone);
       } catch (e) {
         console.error(e);
       }
-    }
-
-    if (!customerId) {
-      setPendingOrders([]);
-      return;
     }
 
     if (!customerId) {
@@ -230,19 +217,69 @@ function AppContent() {
     fetchPendingOrders();
   }, [fetchPendingOrders]);
 
-  // Listen for order changes to refresh pending orders
   useEffect(() => {
-    const ordersChannel = supabase
-      .channel('pending-orders-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => {
-        fetchPendingOrders();
-      })
-      .subscribe();
+    const t = window.setInterval(() => setPickupNowMs(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
 
-    return () => {
-      ordersChannel.unsubscribe();
-    };
-  }, [fetchPendingOrders]);
+  const getPickupCountdownMeta = useCallback((order: PendingOrder) => {
+    if (order.delivery_method !== 'pickup') return null;
+    if (!['under_review', 'preparing', 'arrived', 'cancellation_pending'].includes(order.status)) return null;
+    const deadlineRaw = (order as any).pickup_deadline_at as string | null | undefined;
+    if (!deadlineRaw) return null;
+    const deadlineMs = new Date(deadlineRaw).getTime();
+    if (Number.isNaN(deadlineMs)) return null;
+    const diff = deadlineMs - pickupNowMs;
+    if (diff <= 0) {
+      return {
+        text: '00:00',
+        className: 'text-red-500 font-black animate-pulse',
+        deadlineRaw
+      };
+    }
+    const totalSec = Math.floor(diff / 1000);
+    const hh = String(Math.floor(totalSec / 3600)).padStart(2, '0');
+    const mm = String(Math.floor((totalSec % 3600) / 60)).padStart(2, '0');
+    // Removed seconds as per user request
+    const cls = diff < 15 * 60 * 1000 ? 'text-red-400 animate-pulse' : diff <= 60 * 60 * 1000 ? 'text-orange-300' : 'text-green-400';
+    return { text: `${hh}:${mm}`, className: cls, deadlineRaw };
+  }, [language, pickupNowMs]);
+
+  const refreshCustomerOrderBadge = useCallback(async () => {
+    await fetchPendingOrders();
+    if (!customerPhone) {
+      setOrdersCount(0);
+      return;
+    }
+    try {
+      const { data: customer } = await supabase
+        .from('customers')
+        .select('id')
+        .eq('phone', customerPhone)
+        .maybeSingle();
+      if (!customer) {
+        setOrdersCount(0);
+        return;
+      }
+      const { data: activeOrders } = await supabase
+        .from('orders')
+        .select('id')
+        .eq('customer_id', customer.id)
+        .not('status', 'in', '("completed","cancelled")');
+      setOrdersCount(activeOrders?.length || 0);
+    } catch (error) {
+      console.error('Error refreshing customer order badge:', error);
+    }
+  }, [customerPhone, fetchPendingOrders]);
+
+  useRealtimeRefetch(
+    'app-customer-orders',
+    ['orders', 'order_items'],
+    () => {
+      void refreshCustomerOrderBadge();
+    },
+    { enabled: !!customerPhone }
+  );
 
   // Slideshow for pending orders: Only advance when status changes
   useEffect(() => {
@@ -251,12 +288,12 @@ function AppContent() {
     // Monitor for status changes
     const ordersStatuses = pendingOrders.map(o => `${o.id}-${o.status}`).join('|');
     const lastStatuses = (window as any)._lastOrdersStatuses;
-    
+
     if (lastStatuses && lastStatuses !== ordersStatuses) {
       // Find which order changed status
       const lastStatusArr = lastStatuses ? lastStatuses.split('|') : [];
       const currentStatusArr = ordersStatuses.split('|');
-      
+
       for (let i = 0; i < currentStatusArr.length; i++) {
         if (currentStatusArr[i] !== lastStatusArr[i]) {
           setCurrentPendingOrderIndex(i);
@@ -264,7 +301,7 @@ function AppContent() {
         }
       }
     }
-    
+
     (window as any)._lastOrdersStatuses = ordersStatuses;
   }, [pendingOrders]);
 
@@ -295,25 +332,37 @@ function AppContent() {
     }
   };
 
-  // Helper for order status display (rest preserved)
-  const getOrderStatusInfo = (status: string) => {
+  const getOrderStatusInfo = (status: string, deliveryMethod?: string) => {
+    if (deliveryMethod === 'pickup') {
+      switch (status) {
+        case 'under_review':
+          return { icon: Clock, text: 'قيد المعاينة', color: 'text-yellow-400', bg: 'bg-yellow-500/10', border: 'border-yellow-500/30' };
+        case 'preparing':
+          return { icon: Package, text: 'قيد التحضير', color: 'text-blue-400', bg: 'bg-blue-500/10', border: 'border-blue-500/30' };
+        case 'arrived':
+          return { icon: Package, text: 'تم التحضير', color: 'text-orange-400', bg: 'bg-orange-500/10', border: 'border-orange-500/30' };
+        case 'completed':
+          return { icon: CheckCircle, text: 'تم التسليم', color: 'text-green-400', bg: 'bg-green-500/10', border: 'border-green-500/30' };
+      }
+    }
+
     switch (status) {
       case 'under_review':
-        return { icon: Clock, text: language === 'ar' ? 'قيد المعاينة' : 'Under Review', color: 'text-yellow-400', bg: 'bg-yellow-500/20' };
+        return { icon: Clock, text: language === 'ar' ? 'قيد المعاينة' : 'Under Review', color: 'text-yellow-400', bg: 'bg-yellow-500/10', border: 'border-yellow-500/30' };
       case 'preparing':
-        return { icon: Package, text: language === 'ar' ? 'قيد التحضير' : 'Preparing', color: 'text-blue-400', bg: 'bg-blue-500/20' };
+        return { icon: Package, text: language === 'ar' ? 'قيد التحضير' : 'Preparing', color: 'text-blue-400', bg: 'bg-blue-500/10', border: 'border-blue-500/30' };
       case 'on_way':
-        return { icon: Truck, text: language === 'ar' ? 'في الطريق' : 'On the Way', color: 'text-purple-400', bg: 'bg-purple-500/20' };
+        return { icon: Truck, text: language === 'ar' ? 'في الطريق' : 'On the Way', color: 'text-purple-400', bg: 'bg-purple-500/10', border: 'border-purple-500/30' };
       case 'arrived':
-        return { icon: AlertTriangleIcon, text: language === 'ar' ? 'وصل الآن' : 'Arrived', color: 'text-orange-400', bg: 'bg-orange-500/20' };
+        return { icon: AlertTriangleIcon, text: language === 'ar' ? 'وصل الآن' : 'Arrived', color: 'text-orange-400', bg: 'bg-orange-500/10', border: 'border-orange-500/30' };
       case 'completed':
-        return { icon: CheckCircle, text: language === 'ar' ? 'تم التسليم' : 'Completed', color: 'text-green-400', bg: 'bg-green-500/20' };
+        return { icon: CheckCircle, text: language === 'ar' ? 'مكتمل' : 'Completed', color: 'text-green-400', bg: 'bg-green-500/10', border: 'border-green-500/30' };
       case 'cancelled':
-        return { icon: XCircle, text: language === 'ar' ? 'ملغي' : 'Cancelled', color: 'text-red-400', bg: 'bg-red-500/20' };
+        return { icon: XCircle, text: language === 'ar' ? 'ملغي' : 'Cancelled', color: 'text-red-400', bg: 'bg-red-500/10', border: 'border-red-500/30' };
       case 'cancellation_pending':
-        return { icon: Clock, text: language === 'ar' ? 'إلغاء قيد المعاينة' : 'Cancellation Pending', color: 'text-yellow-400', bg: 'bg-yellow-500/20' };
+        return { icon: Clock, text: language === 'ar' ? 'طلب إلغاء' : 'Cancel Request', color: 'text-yellow-400', bg: 'bg-yellow-500/10', border: 'border-yellow-500/30' };
       default:
-        return { icon: Package, text: status, color: 'text-gray-400', bg: 'bg-gray-500/20' };
+        return { icon: Package, text: status, color: 'text-gray-400', bg: 'bg-gray-500/10', border: 'border-gray-500/30' };
     }
   };
 
@@ -353,10 +402,10 @@ function AppContent() {
         .order('created_at', { ascending: false });
       const byCustomerPromise = customerIdForPhone
         ? supabase
-            .from('device_coupons')
-            .select('*')
-            .eq('customer_id', customerIdForPhone)
-            .order('created_at', { ascending: false })
+          .from('device_coupons')
+          .select('*')
+          .eq('customer_id', customerIdForPhone)
+          .order('created_at', { ascending: false })
         : Promise.resolve({ data: [], error: null } as any);
       const [byDevice, byCustomer] = await Promise.all([byDevicePromise, byCustomerPromise]);
       const mergedMap = new Map<string, any>();
@@ -411,7 +460,7 @@ function AppContent() {
           if (parsed && parsed.phone) {
             setCustomerPhone(parsed.phone);
           }
-        } catch (e) {}
+        } catch (e) { }
       }
     }
     // No need to set customerId state here, handled in fetches
@@ -452,8 +501,10 @@ function AppContent() {
     checkCustomerOrders();
   }, [customerPhone]);
 
-  const fetchData = async () => {
-    setLoading(true);
+  const fetchData = async (silent = false) => {
+    if (!silent && !hasLoadedMenuRef.current) {
+      setLoading(true);
+    }
 
     const [categoriesRes, itemsRes] = await Promise.all([
       supabase.from('categories').select('*').eq('is_active', true).order('display_order'),
@@ -461,8 +512,43 @@ function AppContent() {
     ]);
 
     if (categoriesRes.data) setCategories(categoriesRes.data);
-    if (itemsRes.data) setItems(itemsRes.data);
+    if (itemsRes.data) {
+      setItems(itemsRes.data);
+      
+      setCartItems(prevCart => {
+        if (prevCart.length === 0) return prevCart;
+        let hasChanges = false;
+        const newCart = prevCart.map(cartItem => {
+          const dbItem = itemsRes.data.find(i => i.id === cartItem.id);
+          
+          if (!dbItem || !dbItem.is_active || !dbItem.is_available) {
+            if (!cartItem.cart_synced_unavailable) {
+              hasChanges = true;
+              return { ...cartItem, cart_synced_unavailable: true };
+            }
+            return cartItem;
+          }
+          
+          const dataChanged = 
+            dbItem.price !== cartItem.price ||
+            dbItem.name !== cartItem.name ||
+            dbItem.image_url !== cartItem.image_url ||
+            dbItem.has_offer !== cartItem.has_offer ||
+            dbItem.offer_price !== cartItem.offer_price ||
+            cartItem.cart_synced_unavailable === true;
+            
+          if (dataChanged) {
+            hasChanges = true;
+            return { ...dbItem, quantity: cartItem.quantity, cart_synced_data_changed: true, cart_synced_unavailable: false };
+          }
+          
+          return cartItem;
+        });
+        return hasChanges ? newCart : prevCart;
+      });
+    }
 
+    hasLoadedMenuRef.current = true;
     setLoading(false);
   };
 
@@ -477,7 +563,7 @@ function AppContent() {
 
       const headerCartBtn = document.querySelector('[data-cart-button]') as HTMLElement;
       const bottomHandle = document.querySelector('[data-cart-handle]') as HTMLElement;
-      
+
       const bottomSheet = document.getElementById('cart-bottom-sheet');
       const isSheetFull = bottomSheet?.getAttribute('data-state') === 'full';
 
@@ -563,7 +649,7 @@ function AppContent() {
         setTimeout(() => {
           const headerCartBtn = document.querySelector('[data-cart-button]') as HTMLElement;
           const bottomHandle = document.querySelector('[data-cart-handle]') as HTMLElement;
-          
+
           const headerVisible = window.scrollY < 80;
           const isTargetHeader = headerVisible && targetElement === headerCartBtn;
           const isTargetBottom = (isTouchPhoneChrome() || !headerVisible) && targetElement === bottomHandle;
@@ -612,6 +698,12 @@ function AppContent() {
   };
 
   const handleUpdateQuantity = (itemId: string, quantity: number) => {
+    if (editingOrder && editingOrder.status === 'preparing') {
+      const originalItem = editingOrder.items.find((oi: any) => oi.item_id === itemId);
+      if (originalItem && quantity < originalItem.quantity) {
+        return; // prevent decreasing below original quantity
+      }
+    }
     if (quantity < 1) {
       handleRemoveItem(itemId);
       return;
@@ -622,6 +714,12 @@ function AppContent() {
   };
 
   const handleRemoveItem = (itemId: string) => {
+    if (editingOrder && editingOrder.status === 'preparing') {
+      const originalItem = editingOrder.items.find((oi: any) => oi.item_id === itemId);
+      if (originalItem) {
+        return; // prevent removal
+      }
+    }
     setCartItems(prev => prev.filter(item => item.id !== itemId));
   };
 
@@ -657,173 +755,196 @@ function AppContent() {
     setShowCart(true);
   };
 
+  const handleStartOrderEdit = (order: any) => {
+    setEditingOrder(order);
+    setShowProfile(false);
+    
+    // Map order.items to CartItem[]
+    const initialCartItems = order.items.map((orderItem: any) => {
+      const catalogItem = items.find(i => i.id === orderItem.item_id);
+      return {
+        id: orderItem.item_id,
+        category_id: catalogItem?.category_id || '',
+        name: orderItem.item_name,
+        name_en: catalogItem?.name_en || orderItem.item_name,
+        price: orderItem.unit_price,
+        image_url: catalogItem?.image_url || '',
+        is_available: catalogItem?.is_available ?? true,
+        is_active: catalogItem?.is_active ?? true,
+        has_offer: catalogItem?.has_offer ?? false,
+        offer_price: catalogItem?.offer_price,
+        display_order: catalogItem?.display_order || 0,
+        created_at: catalogItem?.created_at || '',
+        updated_at: catalogItem?.updated_at || '',
+        quantity: orderItem.quantity
+      } as CartItem;
+    });
+    
+    setCartItems(initialCartItems);
+    setShowCart(true);
+  };
+
+  const handleCancelOrderEdit = () => {
+    setEditingOrder(null);
+    setCartItems([]);
+    setShowCart(false);
+    setShowProfile(true);
+  };
+
+  const handleSaveOrderEdit = async () => {
+    if (!editingOrder) return;
+    
+    const newOrderItems = cartItems.map(item => ({
+      order_id: editingOrder.id,
+      item_id: item.id,
+      item_name: item.name,
+      quantity: item.quantity,
+      unit_price: item.has_offer && item.offer_price ? item.offer_price : item.price,
+      subtotal: (item.has_offer && item.offer_price ? item.offer_price : item.price) * item.quantity
+    }));
+
+    // Calculate new total amount
+    const itemsTotal = newOrderItems.reduce((sum, item) => sum + item.subtotal, 0);
+    const discount = editingOrder.applied_coupon_discount_percent 
+      ? Math.round((itemsTotal * editingOrder.applied_coupon_discount_percent) / 100) 
+      : 0;
+      
+    // original delivery fee calculation
+    const originalItemsTotal = editingOrder.items.reduce((sum: number, item: any) => sum + item.subtotal, 0);
+    const originalDiscount = editingOrder.applied_coupon_discount_percent 
+      ? Math.round((originalItemsTotal * editingOrder.applied_coupon_discount_percent) / 100) 
+      : 0;
+    const originalDeliveryFee = editingOrder.total_amount - (originalItemsTotal - originalDiscount);
+    
+    const newTotalAmount = itemsTotal - discount + originalDeliveryFee;
+
+    // Database updates: delete existing order items first
+    const { error: deleteError } = await supabase
+      .from('order_items')
+      .delete()
+      .eq('order_id', editingOrder.id);
+
+    if (deleteError) {
+      console.error('Error deleting order items:', deleteError);
+      alert(language === 'ar' ? 'فشل تحديث الطلب.' : 'Failed to update order items.');
+      return;
+    }
+
+    // Insert new order items
+    const { error: insertError } = await supabase
+      .from('order_items')
+      .insert(newOrderItems);
+
+    if (insertError) {
+      console.error('Error inserting new order items:', insertError);
+      alert(language === 'ar' ? 'فشل تحديث الطلب.' : 'Failed to update order items.');
+      return;
+    }
+
+    // Update order total and flag
+    const { error: updateError } = await supabase
+      .from('orders')
+      .update({
+        total_amount: newTotalAmount,
+        customer_update_flag: true,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', editingOrder.id);
+
+    if (updateError) {
+      console.error('Error updating order:', updateError);
+      alert(language === 'ar' ? 'فشل تحديث الطلب.' : 'Failed to update order.');
+      return;
+    }
+
+    // Done saving
+    setEditingOrder(null);
+    setCartItems([]);
+    setShowCart(false);
+    setShowProfile(true);
+  };
+
   const handleConfirmOrder = async (
     customerData: CustomerData,
     paymentMethod: 'cash' | 'instant_transfer',
     orderNote?: string,
     appliedCouponId?: string,
     deliveryFee?: number,
-    serviceInfo?: { service: DeliveryService; layer: DeliveryZoneLayer | null } | null
+    serviceInfo?: { service: DeliveryService; layer: DeliveryZoneLayer | null } | null,
+    pickupMeta?: {
+      pickupDeadlineAt?: string;
+      pickupCommitmentKind?: 'now' | 'hour' | 'custom';
+      pickupCommitmentAck?: boolean;
+      pickupCommitmentLabel?: string;
+    }
   ) => {
+    if (orderConfirmInFlightRef.current) return;
+    
+    if (cartItems.some(item => item.cart_synced_unavailable)) {
+      alert(language === 'ar' ? 'بعض الأصناف في سلتك لم تعد متوفرة، يرجى إزالتها أولاً' : 'Some items in your cart are no longer available, please remove them first');
+      return;
+    }
+    
+    orderConfirmInFlightRef.current = true;
+    setOrderConfirmSubmitting(true);
     try {
-      let authoritativeDeliveryFee = deliveryFee ?? 0;
-      if (customerData.deliveryMethod === 'delivery') {
-        const lat = customerData.latitude;
-        const lng = customerData.longitude;
-        if (lat == null || lng == null) {
-          throw new Error('يجب تحديد موقع التوصيل على الخريطة قبل إتمام الطلب.');
-        }
-        const { zones, services } = await fetchDeliveryZonesAndServices();
-        const match = getDeliveryMatch(lat, lng, services, zones);
-        if (!match.isInGreen) {
-          throw new Error('عذراً، عنوانك خارج منطقة التوصيل المحددة. لا يمكن إتمام الطلب.');
-        }
-        authoritativeDeliveryFee = match.price;
-      }
-
-      const deviceFingerprint = getOrCreateDeviceFingerprint();
-
-      // Check for existing customer with same phone
-      const { data: existingCustomer, error: customerCheckError } = await supabase
-        .from('customers')
-        .select('id, device_fingerprint, name')
-        .eq('phone', customerData.phone)
-        .maybeSingle();
-
-      if (customerCheckError) {
-        console.error('Error checking customer:', customerCheckError);
-        throw new Error('خطأ في التحقق من بيانات العميل');
-      }
-
-      // Check if same name and phone but different device
-      if (existingCustomer && existingCustomer.device_fingerprint &&
-        existingCustomer.device_fingerprint !== deviceFingerprint &&
-        existingCustomer.name === customerData.name) {
-        const confirm = window.confirm(
-          'تحذير: يوجد حساب آخر بنفس الاسم ورقم الهاتف على جهاز مختلف.\n\n' +
-          'هل أنت متأكد أنك تريد المتابعة؟'
-        );
-        if (!confirm) {
-          return;
-        }
-      }
-
-      let customerId = existingCustomer?.id;
-
-      if (!customerId) {
-        // Try to insert with device_fingerprint, if it fails, try without
-        // Only send columns الموجودة فعلاً في جدول customers
-        const customerDataToInsert: any = {
-          name: customerData.name,
-          phone: customerData.phone,
-          address_type: customerData.address_type,
-          address_label: customerData.address_label,
-          street: customerData.street,
-          area: customerData.area,
-          city: customerData.city,
-          apartment: customerData.apartment,
-          floor: customerData.floor,
-          building_number: customerData.building_number,
-          house_name: customerData.house_name,
-          company_name: customerData.company_name,
-          landmark: customerData.landmark,
-          latitude: customerData.latitude,
-          longitude: customerData.longitude,
-          secondary_phone: customerData.secondary_phone
-        };
-        // Remove deliveryMethod as it's not a column in customers table
-        delete customerDataToInsert.deliveryMethod;
-        try {
-          customerDataToInsert.device_fingerprint = deviceFingerprint;
-        } catch (e) {
-          // device_fingerprint column might not exist yet
-          console.warn('device_fingerprint not available, continuing without it');
-        }
-
-        const { data: newCustomer, error: insertError } = await supabase
-          .from('customers')
-          .insert([customerDataToInsert])
-          .select('id')
-          .single();
-
-        if (insertError) {
-          console.error('Error inserting customer:', insertError);
-          // Try without device_fingerprint
-          const { data: newCustomerRetry, error: insertErrorRetry } = await supabase
-            .from('customers')
-            .insert([{
-              name: customerData.name,
-              phone: customerData.phone,
-              address_type: customerData.address_type,
-              address_label: customerData.address_label,
-              street: customerData.street,
-              area: customerData.area,
-              city: customerData.city,
-              apartment: customerData.apartment,
-              floor: customerData.floor,
-              building_number: customerData.building_number,
-              house_name: customerData.house_name,
-              company_name: customerData.company_name,
-              landmark: customerData.landmark,
-              latitude: customerData.latitude,
-              longitude: customerData.longitude,
-              secondary_phone: customerData.secondary_phone
-            }])
-            .select('id')
-            .single();
-
-          if (insertErrorRetry) throw insertErrorRetry;
-          customerId = newCustomerRetry?.id;
-        } else {
-          customerId = newCustomer?.id;
-        }
-        if (customerId) {
-          localStorage.setItem('customer_id', customerId);
-        }
-      } else {
-        // Existing customer
-        if (customerId) {
-          localStorage.setItem('customer_id', customerId);
-        }
-        const updateData: any = {
-          name: customerData.name,
-          address_type: customerData.address_type,
-          address_label: customerData.address_label,
-          street: customerData.street,
-          area: customerData.area,
-          city: customerData.city,
-          apartment: customerData.apartment,
-          floor: customerData.floor,
-          building_number: customerData.building_number,
-          house_name: customerData.house_name,
-          company_name: customerData.company_name,
-          landmark: customerData.landmark,
-          latitude: customerData.latitude,
-          longitude: customerData.longitude,
-          secondary_phone: customerData.secondary_phone
-        };
-        // Remove deliveryMethod as it's not a column in customers table
-        delete updateData.deliveryMethod;
-
-        try {
-          updateData.device_fingerprint = deviceFingerprint;
-          const { error: updateError } = await supabase
-            .from('customers')
-            .update(updateData)
-            .eq('id', customerId);
-
-          if (updateError) {
-            // Try without device_fingerprint
-            delete updateData.device_fingerprint;
-            const { error: retryError } = await supabase
-              .from('customers')
-              .update(updateData)
-              .eq('id', customerId);
-            if (retryError) throw retryError;
+      try {
+        let authoritativeDeliveryFee = deliveryFee ?? 0;
+        if (customerData.deliveryMethod === 'delivery') {
+          const lat = customerData.latitude;
+          const lng = customerData.longitude;
+          if (lat == null || lng == null) {
+            throw new Error('يجب تحديد موقع التوصيل على الخريطة قبل إتمام الطلب.');
           }
-        } catch (e) {
-          console.warn('Could not update customer data:', e);
+          const { zones, services } = await fetchDeliveryZonesAndServices();
+          const match = getDeliveryMatch(lat, lng, services, zones);
+          if (!match.isInGreen) {
+            throw new Error('عذراً، عنوانك خارج منطقة التوصيل المحددة. لا يمكن إتمام الطلب.');
+          }
+          authoritativeDeliveryFee = match.price;
         }
+
+        const deviceFingerprint = getOrCreateDeviceFingerprint();
+
+        const existingCustomer = await findCustomerSummaryByPhone(customerData.phone);
+
+        // Check if same name and phone but different device
+        if (existingCustomer && existingCustomer.device_fingerprint &&
+          existingCustomer.device_fingerprint !== deviceFingerprint &&
+          existingCustomer.name === customerData.name) {
+          const confirm = window.confirm(
+            'تحذير: يوجد حساب آخر بنفس الاسم ورقم الهاتف على جهاز مختلف.\n\n' +
+            'هل أنت متأكد أنك تريد المتابعة؟'
+          );
+          if (!confirm) {
+            return;
+          }
+        }
+
+        const customerPayload: Record<string, unknown> = {
+          name: customerData.name,
+          address_type: customerData.address_type,
+          address_label: customerData.address_label,
+          street: customerData.street,
+          area: customerData.area,
+          city: customerData.city,
+          apartment: customerData.apartment,
+          floor: customerData.floor,
+          building_number: customerData.building_number,
+          house_name: customerData.house_name,
+          company_name: customerData.company_name,
+          landmark: customerData.landmark,
+          latitude: customerData.latitude,
+          longitude: customerData.longitude,
+          secondary_phone: customerData.secondary_phone,
+          device_fingerprint: deviceFingerprint
+        };
+
+        const customerId = await ensureCustomerByPhone(customerData.phone, customerPayload);
+        if (!customerId) {
+          throw new Error('خطأ في التحقق من بيانات العميل');
+        }
+        localStorage.setItem('customer_id', customerId);
 
         // Keep coupon owner identity synced with latest customer name/phone
         try {
@@ -837,231 +958,28 @@ function AppContent() {
         } catch (e) {
           console.warn('Could not sync coupon customer identity:', e);
         }
-      }
 
-      if (!customerId) throw new Error('فشل في إنشاء/تحديث بيانات العميل');
+        const GLOBAL_COUPON_TEMPLATE_FP = 'GLOBAL_TEMPLATE';
 
-      const GLOBAL_COUPON_TEMPLATE_FP = 'GLOBAL_TEMPLATE';
-
-      // Bind all existing device coupons to this customer (for new customers who already unlocked coupons)
-      try {
-        const { data: unboundCoupons } = await supabase
-          .from('device_coupons')
-          .select('id, expires_at, is_disabled')
-          .eq('device_fingerprint', deviceFingerprint)
-          .neq('device_fingerprint', 'GLOBAL_TEMPLATE')
-          .is('customer_id', null);
-
-        if (unboundCoupons && unboundCoupons.length > 0) {
-          const now = new Date();
-          for (const coupon of unboundCoupons) {
-            if (coupon.is_disabled) {
-              continue;
-            }
-            if (coupon.expires_at && new Date(coupon.expires_at) <= now) {
-              await supabase.from('device_coupons').delete().eq('id', coupon.id);
-              continue;
-            }
-            await supabase
-              .from('device_coupons')
-              .update({
-                customer_id: customerId,
-                customer_name: customerData.name,
-                customer_phone: customerData.phone
-              })
-              .eq('id', coupon.id);
-          }
-        }
-      } catch (e) {
-        console.warn('Could not bind/clean device coupons:', e);
-      }
-
-      // Server-side coupon sync: reject stale/local-only coupons (e.g. operator deleted row)
-      // IMPORTANT: verify AFTER binding so coupon belongs to the current customer_id
-      if (appliedCouponId) {
-        const { data: couponRow, error: couponFetchErr } = await supabase
-          .from('device_coupons')
-          .select('id, device_fingerprint, customer_id, code, discount_percent, expires_at, is_disabled')
-          .eq('id', appliedCouponId)
-          .maybeSingle();
-
-        if (couponFetchErr) {
-          console.error('Coupon verify error:', couponFetchErr);
-          throw new Error('تعذر التحقق من الكوبون. تحقق من الاتصال وحاول مرة أخرى.');
-        }
-
-        const nowCoupon = new Date();
-
-        const invalidateLocalCoupon = async () => {
-          setDeviceCoupons((prev) => prev.filter((c) => c.id !== appliedCouponId));
-          await fetchCouponConfigAndCoupons();
-        };
-
-        if (!couponRow || couponRow.device_fingerprint === GLOBAL_COUPON_TEMPLATE_FP) {
-          await invalidateLocalCoupon();
-          throw new Error(
-            'لم يعد الكوبون المحدد صالحاً (قد تم إزالته أو تعديله). تم تحديث القائمة — أعد المحاولة من دون كوبون أو اختر كوبوناً متاحاً.'
-          );
-        }
-
-        if (couponRow.is_disabled) {
-          await invalidateLocalCoupon();
-          throw new Error('تم تعطيل هذا الكوبون. لا يمكن إتمام الطلب باستخدامه.');
-        }
-
-        if (couponRow.expires_at && new Date(couponRow.expires_at) <= nowCoupon) {
-          await invalidateLocalCoupon();
-          throw new Error('انتهت صلاحية هذا الكوبون.');
-        }
-
-        const customerMatch = couponRow.customer_id != null && couponRow.customer_id === customerId;
-        if (!customerMatch) {
-          // Prevent using coupons from old phone/customer even on same device
-          await invalidateLocalCoupon();
-          throw new Error('هذا الكوبون غير مرتبط بهذا الرقم/الحساب.');
-        }
-      }
-
-      // Get customer general notes by phone and name (from customer_general_notes table)
-      let generalNotes: any[] = [];
-      try {
-        const { data: generalNotesData, error: generalNotesError } = await supabase
-          .from('customer_general_notes')
-          .select('*')
-          .eq('customer_phone', customerData.phone)
-          .eq('customer_name', customerData.name)
-          .order('created_at', { ascending: false });
-
-        if (!generalNotesError && generalNotesData) {
-          generalNotes = generalNotesData;
-          console.log('General notes found by phone and name:', generalNotes.length);
-        } else if (generalNotesError) {
-          console.warn('Error fetching general notes:', generalNotesError);
-        }
-      } catch (e) {
-        console.warn('Could not fetch general notes:', e);
-      }
-
-      // Generate 4 random digits for order number
-      const randomDigits = Math.floor(1000 + Math.random() * 9000);
-      const orderNumber = randomDigits.toString();
-      const baseTotalAmount = cartItems.reduce((sum, item) => {
-        const price = item.has_offer && item.offer_price ? item.offer_price : item.price;
-        return sum + price * item.quantity;
-      }, 0);
-
-      let appliedCoupon: DeviceCoupon | null = null;
-      let finalTotalAmount = baseTotalAmount;
-
-      // Apply selected coupon if provided (must match server re-fetch after verify above)
-      if (appliedCouponId) {
-        const { data: serverCoupon } = await supabase
-          .from('device_coupons')
-          .select('*')
-          .eq('id', appliedCouponId)
-          .maybeSingle();
-        if (serverCoupon && serverCoupon.device_fingerprint !== GLOBAL_COUPON_TEMPLATE_FP) {
-          appliedCoupon = serverCoupon as DeviceCoupon;
-        }
-      }
-
-      if (appliedCouponId && !appliedCoupon) {
-        await fetchCouponConfigAndCoupons();
-        throw new Error('تعذر تطبيق الكوبون أثناء إنشاء الطلب. حدّث الصفحة وأعد المحاولة.');
-      }
-
-      if (appliedCoupon) {
-        const discount = Math.round((baseTotalAmount * appliedCoupon.discount_percent) / 100);
-        finalTotalAmount = Math.max(0, baseTotalAmount - discount);
-      }
-
-      // Add delivery fee from server-side zone match (cannot rely on client-only value)
-      if (customerData.deliveryMethod === 'delivery' && authoritativeDeliveryFee > 0) {
-        finalTotalAmount += authoritativeDeliveryFee;
-      }
-
-      // Try to insert order with order_note, if it fails, try without
-      const orderData: any = {
-        customer_id: customerId,
-        order_number: orderNumber,
-        payment_method: paymentMethod,
-        total_amount: finalTotalAmount,
-        status: 'under_review',
-        delivery_method: customerData.deliveryMethod,
-        building_number: customerData.building_number
-      };
-
-      if (appliedCoupon) {
-        orderData.applied_coupon_id = appliedCoupon.id;
-        orderData.applied_coupon_code = appliedCoupon.code;
-        orderData.applied_coupon_discount_percent = appliedCoupon.discount_percent;
-      }
-
-      // Snapshot customer data into order fields
-      orderData.customer_name = customerData.name;
-      orderData.customer_phone = customerData.phone;
-      orderData.customer_secondary_phone = customerData.secondary_phone;
-      orderData.customer_address_type = customerData.address_type;
-      orderData.customer_address_label = customerData.address_label;
-      orderData.customer_street = customerData.street;
-      orderData.customer_area = customerData.area;
-      orderData.customer_city = customerData.city;
-      orderData.customer_apartment = customerData.apartment;
-      orderData.customer_floor = customerData.floor;
-      orderData.customer_building_number = customerData.building_number;
-      orderData.customer_house_name = customerData.house_name;
-      orderData.customer_company_name = customerData.company_name;
-      orderData.customer_landmark = customerData.landmark;
-      orderData.customer_latitude = customerData.latitude;
-      orderData.customer_longitude = customerData.longitude;
-
-      // Set order_note only if customer provided a new note (don't copy from previous orders)
-      // Customer notes stay only on the order they were written for
-      if (orderNote && orderNote.trim()) {
+        // Bind all existing device coupons to this customer (for new customers who already unlocked coupons)
         try {
-          orderData.order_note = orderNote.trim();
-        } catch (e) {
-          console.warn('order_note column might not exist');
-        }
-      }
+          const { data: unboundCoupons } = await supabase
+            .from('device_coupons')
+            .select('id, expires_at, is_disabled')
+            .eq('device_fingerprint', deviceFingerprint)
+            .neq('device_fingerprint', 'GLOBAL_TEMPLATE')
+            .is('customer_id', null);
 
-      const { data: order, error: orderError } = await supabase
-        .from('orders')
-        .insert([orderData])
-        .select()
-        .single();
-
-      if (orderError) {
-        console.error('Error creating order:', orderError);
-        // Try without order_note
-        if (orderData.order_note) {
-          delete orderData.order_note;
-          const { data: orderRetry, error: orderErrorRetry } = await supabase
-            .from('orders')
-            .insert([orderData])
-            .select()
-            .single();
-
-          if (orderErrorRetry) throw orderErrorRetry;
-          if (!orderRetry) throw new Error('فشل في إنشاء الطلب');
-
-          // Use retry order
-          const orderItems = cartItems.map(item => ({
-            order_id: orderRetry.id,
-            item_id: item.id,
-            item_name: item.name,
-            quantity: item.quantity,
-            unit_price: item.has_offer && item.offer_price ? item.offer_price : item.price,
-            subtotal: (item.has_offer && item.offer_price ? item.offer_price : item.price) * item.quantity
-          }));
-
-          const { error: itemsError } = await supabase.from('order_items').insert(orderItems);
-          if (itemsError) throw itemsError;
-
-          // Mark coupon as used and bind it to customer after successful order creation
-          // Bind coupon to customer but DO NOT mark as used (keep it persistent)
-          if (appliedCoupon) {
-            try {
+          if (unboundCoupons && unboundCoupons.length > 0) {
+            const now = new Date();
+            for (const coupon of unboundCoupons) {
+              if (coupon.is_disabled) {
+                continue;
+              }
+              if (coupon.expires_at && new Date(coupon.expires_at) <= now) {
+                await supabase.from('device_coupons').delete().eq('id', coupon.id);
+                continue;
+              }
               await supabase
                 .from('device_coupons')
                 .update({
@@ -1069,165 +987,381 @@ function AppContent() {
                   customer_name: customerData.name,
                   customer_phone: customerData.phone
                 })
-                .eq('id', appliedCoupon.id);
-              // Do not remove from state so it remains visible
-              // setDeviceCoupons(prev => prev.filter(c => c.id !== appliedCoupon!.id));
-            } catch (e) {
-              console.error('Error binding coupon to customer (retry path):', e);
+                .eq('id', coupon.id);
             }
           }
+        } catch (e) {
+          console.warn('Could not bind/clean device coupons:', e);
+        }
 
-          // Add order note as customer note if order_note column doesn't exist
-          if (orderNote && orderNote.trim()) {
-            try {
-              await supabase.from('customer_notes').insert([{
-                customer_id: customerId,
-                order_id: orderRetry.id,
-                note: orderNote.trim(),
-                created_by: 'customer'
-              }]);
-            } catch (e) {
-              console.warn('Could not add order note:', e);
-            }
-          }
-
-          localStorage.setItem('customer_phone', customerData.phone);
-          setCustomerPhone(customerData.phone);
-          setCartItems([]);
-          setShowCheckout(false);
-
-          const { data: pwdRowRetry } = await supabase
-            .from('customers')
-            .select('phone_password_hash')
-            .eq('id', customerId)
+        // Server-side coupon sync: reject stale/local-only coupons (e.g. operator deleted row)
+        // IMPORTANT: verify AFTER binding so coupon belongs to the current customer_id
+        if (appliedCouponId) {
+          const { data: couponRow, error: couponFetchErr } = await supabase
+            .from('device_coupons')
+            .select('id, device_fingerprint, customer_id, code, discount_percent, expires_at, is_disabled')
+            .eq('id', appliedCouponId)
             .maybeSingle();
 
-          setPostOrderPwd('');
-          setPostOrderPwd2('');
-          setPostOrderPwdErr(null);
-          setPostOrderRecoveryCode(null);
-          setShowOptionalSecurity(false);
+          if (couponFetchErr) {
+            console.error('Coupon verify error:', couponFetchErr);
+            throw new Error('تعذر التحقق من الكوبون. تحقق من الاتصال وحاول مرة أخرى.');
+          }
 
-          setOrderSuccess({
-            orderNumber,
-            deliveryMethod: customerData.deliveryMethod,
-            branchName: serviceInfo?.service.name,
-            branchLocation: serviceInfo?.service.branch_location as any,
-            needsPasswordSetup: !pwdRowRetry?.phone_password_hash,
-            setupCustomerId: customerId,
-            setupPhone: customerData.phone
-          });
-          void fetchCouponConfigAndCoupons();
-          return;
+          const nowCoupon = new Date();
+
+          const invalidateLocalCoupon = async () => {
+            setDeviceCoupons((prev) => prev.filter((c) => c.id !== appliedCouponId));
+            await fetchCouponConfigAndCoupons();
+          };
+
+          if (!couponRow || couponRow.device_fingerprint === GLOBAL_COUPON_TEMPLATE_FP) {
+            await invalidateLocalCoupon();
+            throw new Error(
+              'لم يعد الكوبون المحدد صالحاً (قد تم إزالته أو تعديله). تم تحديث القائمة — أعد المحاولة من دون كوبون أو اختر كوبوناً متاحاً.'
+            );
+          }
+
+          if (couponRow.is_disabled) {
+            await invalidateLocalCoupon();
+            throw new Error('تم تعطيل هذا الكوبون. لا يمكن إتمام الطلب باستخدامه.');
+          }
+
+          if (couponRow.expires_at && new Date(couponRow.expires_at) <= nowCoupon) {
+            await invalidateLocalCoupon();
+            throw new Error('انتهت صلاحية هذا الكوبون.');
+          }
+
+          const customerMatch = couponRow.customer_id != null && couponRow.customer_id === customerId;
+          if (!customerMatch) {
+            // Prevent using coupons from old phone/customer even on same device
+            await invalidateLocalCoupon();
+            throw new Error('هذا الكوبون غير مرتبط بهذا الرقم/الحساب.');
+          }
         }
-        throw orderError;
-      }
 
-      if (!order) throw new Error('فشل في إنشاء الطلب');
-
-      const orderItems = cartItems.map(item => ({
-        order_id: order.id,
-        item_id: item.id,
-        item_name: item.name,
-        quantity: item.quantity,
-        unit_price: item.has_offer && item.offer_price ? item.offer_price : item.price,
-        subtotal: (item.has_offer && item.offer_price ? item.offer_price : item.price) * item.quantity
-      }));
-
-      const { error: itemsError } = await supabase.from('order_items').insert(orderItems);
-      if (itemsError) {
-        console.error('Error inserting order items:', itemsError);
-        throw itemsError;
-      }
-
-      // Mark coupon as used and bind it to customer after successful order creation
-      // Bind coupon to customer but DO NOT mark as used (keep it persistent)
-      if (appliedCoupon) {
+        // Get customer general notes by phone and name (from customer_general_notes table)
+        let generalNotes: any[] = [];
         try {
-          await supabase
-            .from('device_coupons')
-            .update({
-              customer_id: customerId,
-              customer_name: customerData.name,
-              customer_phone: customerData.phone
-            })
-            .eq('id', appliedCoupon.id);
-          // Do not remove from state so it remains visible
-          // setDeviceCoupons(prev => prev.filter(c => c.id !== appliedCoupon!.id));
-        } catch (e) {
-          console.error('Error binding coupon to customer:', e);
-        }
-      }
+          const { data: generalNotesData, error: generalNotesError } = await supabase
+            .from('customer_general_notes')
+            .select('*')
+            .eq('customer_phone', customerData.phone)
+            .eq('customer_name', customerData.name)
+            .order('created_at', { ascending: false });
 
-      // Copy general customer notes to this order (from customer_general_notes)
-      if (generalNotes && generalNotes.length > 0) {
-        try {
-          const notesToInsert = generalNotes.map(note => ({
-            customer_id: customerId,
-            order_id: order.id,
-            note: note.note,
-            created_by: note.created_by || 'operator',
-            general_note_id: note.general_note_id || note.id || null,
-            is_public: note.is_public ?? true
-          }));
-
-          console.log('Inserting general notes to order:', notesToInsert);
-          const { data: insertedNotes, error: notesInsertError } = await supabase
-            .from('customer_notes')
-            .insert(notesToInsert)
-            .select();
-
-          if (notesInsertError) {
-            console.error('Could not copy general notes:', notesInsertError);
-            // Try inserting one by one if batch fails
-            for (const note of notesToInsert) {
-              try {
-                await supabase.from('customer_notes').insert([note]);
-              } catch (singleError) {
-                console.error('Could not insert single note:', singleError);
-              }
-            }
-          } else {
-            console.log('Successfully copied', insertedNotes?.length || 0, 'general notes to order');
+          if (!generalNotesError && generalNotesData) {
+            generalNotes = generalNotesData;
+            console.log('General notes found by phone and name:', generalNotes.length);
+          } else if (generalNotesError) {
+            console.warn('Error fetching general notes:', generalNotesError);
           }
         } catch (e) {
-          console.error('Could not copy general notes:', e);
+          console.warn('Could not fetch general notes:', e);
         }
+
+        // Generate 4 random digits for order number
+        const randomDigits = Math.floor(1000 + Math.random() * 9000);
+        const orderNumber = randomDigits.toString();
+        const baseTotalAmount = cartItems.reduce((sum, item) => {
+          const price = item.has_offer && item.offer_price ? item.offer_price : item.price;
+          return sum + price * item.quantity;
+        }, 0);
+
+        let appliedCoupon: DeviceCoupon | null = null;
+        let finalTotalAmount = baseTotalAmount;
+
+        // Apply selected coupon if provided (must match server re-fetch after verify above)
+        if (appliedCouponId) {
+          const { data: serverCoupon } = await supabase
+            .from('device_coupons')
+            .select('*')
+            .eq('id', appliedCouponId)
+            .maybeSingle();
+          if (serverCoupon && serverCoupon.device_fingerprint !== GLOBAL_COUPON_TEMPLATE_FP) {
+            appliedCoupon = serverCoupon as DeviceCoupon;
+          }
+        }
+
+        if (appliedCouponId && !appliedCoupon) {
+          await fetchCouponConfigAndCoupons();
+          throw new Error('تعذر تطبيق الكوبون أثناء إنشاء الطلب. حدّث الصفحة وأعد المحاولة.');
+        }
+
+        if (appliedCoupon) {
+          const discount = Math.round((baseTotalAmount * appliedCoupon.discount_percent) / 100);
+          finalTotalAmount = Math.max(0, baseTotalAmount - discount);
+        }
+
+        // Add delivery fee from server-side zone match (cannot rely on client-only value)
+        if (customerData.deliveryMethod === 'delivery' && authoritativeDeliveryFee > 0) {
+          finalTotalAmount += authoritativeDeliveryFee;
+        }
+
+        const rateSettings = await fetchRateSettings();
+        const rateDiscountPercent = rateSettings.percent > 0 ? rateSettings.percent : null;
+
+        // Try to insert order with order_note, if it fails, try without
+        const orderData: any = {
+          customer_id: customerId,
+          order_number: orderNumber,
+          payment_method: paymentMethod,
+          total_amount: finalTotalAmount,
+          status: 'under_review',
+          delivery_method: customerData.deliveryMethod,
+          building_number: customerData.building_number
+        };
+
+        if (customerData.deliveryMethod === 'pickup' && pickupMeta?.pickupDeadlineAt) {
+          orderData.pickup_deadline_at = pickupMeta.pickupDeadlineAt;
+          orderData.pickup_commitment_kind = pickupMeta.pickupCommitmentKind || null;
+          orderData.pickup_commitment_ack = pickupMeta.pickupCommitmentAck ?? true;
+          orderData.pickup_commitment_label = pickupMeta.pickupCommitmentLabel || null;
+        }
+
+        if (appliedCoupon) {
+          orderData.applied_coupon_id = appliedCoupon.id;
+          orderData.applied_coupon_code = appliedCoupon.code;
+          orderData.applied_coupon_discount_percent = appliedCoupon.discount_percent;
+        }
+
+        // Snapshot customer data into order fields
+        orderData.customer_name = customerData.name;
+        orderData.customer_phone = customerData.phone;
+        orderData.customer_secondary_phone = customerData.secondary_phone;
+        orderData.customer_address_type = customerData.address_type;
+        orderData.customer_address_label = customerData.address_label;
+        orderData.customer_street = customerData.street;
+        orderData.customer_area = customerData.area;
+        orderData.customer_city = customerData.city;
+        orderData.customer_apartment = customerData.apartment;
+        orderData.customer_floor = customerData.floor;
+        orderData.customer_building_number = customerData.building_number;
+        orderData.customer_house_name = customerData.house_name;
+        orderData.customer_company_name = customerData.company_name;
+        orderData.customer_landmark = customerData.landmark;
+        orderData.customer_latitude = customerData.latitude;
+        orderData.customer_longitude = customerData.longitude;
+
+        // Set order_note only if customer provided a new note (don't copy from previous orders)
+        // Customer notes stay only on the order they were written for
+        if (orderNote && orderNote.trim()) {
+          try {
+            orderData.order_note = orderNote.trim();
+          } catch (e) {
+            console.warn('order_note column might not exist');
+          }
+        }
+
+        const { data: order, error: orderError } = await supabase
+          .from('orders')
+          .insert([orderData])
+          .select()
+          .single();
+
+        if (orderError) {
+          console.error('Error creating order:', orderError);
+          // Try without order_note
+          if (orderData.order_note) {
+            delete orderData.order_note;
+            const { data: orderRetry, error: orderErrorRetry } = await supabase
+              .from('orders')
+              .insert([orderData])
+              .select()
+              .single();
+
+            if (orderErrorRetry) throw orderErrorRetry;
+            if (!orderRetry) throw new Error('فشل في إنشاء الطلب');
+
+            // Use retry order
+            const orderItems = cartItems.map(item => ({
+              order_id: orderRetry.id,
+              item_id: item.id,
+              item_name: item.name,
+              quantity: item.quantity,
+              unit_price: item.has_offer && item.offer_price ? item.offer_price : item.price,
+              subtotal: (item.has_offer && item.offer_price ? item.offer_price : item.price) * item.quantity,
+              rate_discount_percent: rateDiscountPercent,
+            }));
+
+            const { error: itemsError } = await supabase.from('order_items').insert(orderItems);
+            if (itemsError) throw itemsError;
+
+            // Mark coupon as used and bind it to customer after successful order creation
+            // Bind coupon to customer but DO NOT mark as used (keep it persistent)
+            if (appliedCoupon) {
+              try {
+                await supabase
+                  .from('device_coupons')
+                  .update({
+                    customer_id: customerId,
+                    customer_name: customerData.name,
+                    customer_phone: customerData.phone
+                  })
+                  .eq('id', appliedCoupon.id);
+                // Do not remove from state so it remains visible
+                // setDeviceCoupons(prev => prev.filter(c => c.id !== appliedCoupon!.id));
+              } catch (e) {
+                console.error('Error binding coupon to customer (retry path):', e);
+              }
+            }
+
+            // Add order note as customer note if order_note column doesn't exist
+            if (orderNote && orderNote.trim()) {
+              try {
+                await supabase.from('customer_notes').insert([{
+                  customer_id: customerId,
+                  order_id: orderRetry.id,
+                  note: orderNote.trim(),
+                  created_by: 'customer'
+                }]);
+              } catch (e) {
+                console.warn('Could not add order note:', e);
+              }
+            }
+
+            localStorage.setItem('customer_phone', customerData.phone);
+            setCustomerPhone(customerData.phone);
+            setCartItems([]);
+            setShowCheckout(false);
+
+            const { data: pwdRowRetry } = await supabase
+              .from('customers')
+              .select('phone_password_hash')
+              .eq('id', customerId)
+              .maybeSingle();
+
+            setPostOrderPwd('');
+            setPostOrderPwd2('');
+            setPostOrderPwdErr(null);
+            setPostOrderRecoveryCode(null);
+            setShowOptionalSecurity(false);
+
+            setOrderSuccess({
+              orderNumber,
+              deliveryMethod: customerData.deliveryMethod,
+              branchName: serviceInfo?.service.name,
+              branchLocation: serviceInfo?.service.branch_location as any,
+              needsPasswordSetup: !pwdRowRetry?.phone_password_hash,
+              setupCustomerId: customerId,
+              setupPhone: customerData.phone
+            });
+            void fetchCouponConfigAndCoupons();
+            return;
+          }
+          throw orderError;
+        }
+
+        if (!order) throw new Error('فشل في إنشاء الطلب');
+
+        const orderItems = cartItems.map(item => ({
+          order_id: order.id,
+          item_id: item.id,
+          item_name: item.name,
+          quantity: item.quantity,
+          unit_price: item.has_offer && item.offer_price ? item.offer_price : item.price,
+          subtotal: (item.has_offer && item.offer_price ? item.offer_price : item.price) * item.quantity,
+          rate_discount_percent: rateDiscountPercent,
+        }));
+
+        const { error: itemsError } = await supabase.from('order_items').insert(orderItems);
+        if (itemsError) {
+          console.error('Error inserting order items:', itemsError);
+          throw itemsError;
+        }
+
+        // Mark coupon as used and bind it to customer after successful order creation
+        // Bind coupon to customer but DO NOT mark as used (keep it persistent)
+        if (appliedCoupon) {
+          try {
+            await supabase
+              .from('device_coupons')
+              .update({
+                customer_id: customerId,
+                customer_name: customerData.name,
+                customer_phone: customerData.phone
+              })
+              .eq('id', appliedCoupon.id);
+            // Do not remove from state so it remains visible
+            // setDeviceCoupons(prev => prev.filter(c => c.id !== appliedCoupon!.id));
+          } catch (e) {
+            console.error('Error binding coupon to customer:', e);
+          }
+        }
+
+        // Copy general customer notes to this order (from customer_general_notes)
+        if (generalNotes && generalNotes.length > 0) {
+          try {
+            const notesToInsert = generalNotes.map(note => ({
+              customer_id: customerId,
+              order_id: order.id,
+              note: note.note,
+              created_by: note.created_by || 'operator',
+              general_note_id: note.general_note_id || note.id || null,
+              is_public: note.is_public ?? true
+            }));
+
+            console.log('Inserting general notes to order:', notesToInsert);
+            const { data: insertedNotes, error: notesInsertError } = await supabase
+              .from('customer_notes')
+              .insert(notesToInsert)
+              .select();
+
+            if (notesInsertError) {
+              console.error('Could not copy general notes:', notesInsertError);
+              // Try inserting one by one if batch fails
+              for (const note of notesToInsert) {
+                try {
+                  await supabase.from('customer_notes').insert([note]);
+                } catch (singleError) {
+                  console.error('Could not insert single note:', singleError);
+                }
+              }
+            } else {
+              console.log('Successfully copied', insertedNotes?.length || 0, 'general notes to order');
+            }
+          } catch (e) {
+            console.error('Could not copy general notes:', e);
+          }
+        }
+
+        // order_note is already saved in order.order_note field, no need to duplicate in customer_notes
+
+        setCartItems([]);
+        setShowCheckout(false);
+
+        const { data: pwdRowAfterOrder } = await supabase
+          .from('customers')
+          .select('phone_password_hash')
+          .eq('id', customerId)
+          .maybeSingle();
+
+        setPostOrderPwd('');
+        setPostOrderPwd2('');
+        setPostOrderPwdErr(null);
+        setPostOrderRecoveryCode(null);
+        setShowOptionalSecurity(false);
+
+        setOrderSuccess({
+          orderNumber,
+          deliveryMethod: customerData.deliveryMethod,
+          branchName: serviceInfo?.service.name,
+          branchLocation: serviceInfo?.service.branch_location as any,
+          needsPasswordSetup: !pwdRowAfterOrder?.phone_password_hash,
+          setupCustomerId: customerId,
+          setupPhone: customerData.phone
+        });
+        void fetchCouponConfigAndCoupons();
+      } catch (error: any) {
+        console.error('Error creating order:', error);
+        const errorMessage = error?.message || 'حدث خطأ أثناء إنشاء الطلب';
+        setTimeout(() => {
+          alert(`${errorMessage}\n\nالرجاء المحاولة مرة أخرى أو التحقق من اتصال الإنترنت.`);
+        }, 100);
       }
-
-      // order_note is already saved in order.order_note field, no need to duplicate in customer_notes
-
-      setCartItems([]);
-      setShowCheckout(false);
-
-      const { data: pwdRowAfterOrder } = await supabase
-        .from('customers')
-        .select('phone_password_hash')
-        .eq('id', customerId)
-        .maybeSingle();
-
-      setPostOrderPwd('');
-      setPostOrderPwd2('');
-      setPostOrderPwdErr(null);
-      setPostOrderRecoveryCode(null);
-      setShowOptionalSecurity(false);
-
-      setOrderSuccess({
-        orderNumber,
-        deliveryMethod: customerData.deliveryMethod,
-        branchName: serviceInfo?.service.name,
-        branchLocation: serviceInfo?.service.branch_location as any,
-        needsPasswordSetup: !pwdRowAfterOrder?.phone_password_hash,
-        setupCustomerId: customerId,
-        setupPhone: customerData.phone
-      });
-      void fetchCouponConfigAndCoupons();
-    } catch (error: any) {
-      console.error('Error creating order:', error);
-      const errorMessage = error?.message || 'حدث خطأ أثناء إنشاء الطلب';
-      setTimeout(() => {
-        alert(`${errorMessage}\n\nالرجاء المحاولة مرة أخرى أو التحقق من اتصال الإنترنت.`);
-      }, 100);
+    } finally {
+      orderConfirmInFlightRef.current = false;
+      setOrderConfirmSubmitting(false);
     }
   };
 
@@ -1285,6 +1419,14 @@ function AppContent() {
     return <OperatorPage />;
   }
 
+  if (window.location.pathname === '/rate') {
+    return (
+      <RateAuthProvider>
+        <RatePage />
+      </RateAuthProvider>
+    );
+  }
+
   const totalAmount = cartItems.reduce((sum, item) => {
     const price = item.has_offer && item.offer_price ? item.offer_price : item.price;
     return sum + price * item.quantity;
@@ -1321,7 +1463,7 @@ function AppContent() {
         onCartClick={() => setShowCart(prev => !prev)}
         onProfileClick={() => {
           setProfileInitialTab('settings');
-          setActiveBottomTab('account');
+          if (phoneChrome) setActiveBottomTab('account');
           setShowProfile(prev => !prev);
         }}
         hasOrders={ordersCount > 0}
@@ -1333,7 +1475,7 @@ function AppContent() {
       {/* Pending Orders Banner */}
       {pendingOrders.length > 0 && (
         <div className="bg-gradient-to-r from-primary/20 via-surface to-primary/20 border-b border-primary/30 relative overflow-hidden">
-          <div className="container mx-auto px-4 py-3">
+          <div className="container mx-auto px-4 py-1.5">
             <div className="flex items-center gap-3">
               {/* Left Arrow with count */}
               {currentPendingOrderIndex > 0 && (
@@ -1359,12 +1501,12 @@ function AppContent() {
                 {(() => {
                   const order = pendingOrders[currentPendingOrderIndex];
                   if (!order) return null;
-                  const statusInfo = getOrderStatusInfo(order.status);
+                  const statusInfo = getOrderStatusInfo(order.status, order.delivery_method);
                   const StatusIcon = statusInfo.icon;
                   const currencySymbol = language === 'ar' ? 'ج' : 'EG';
 
                   return (
-                    <div 
+                    <div
                       className="flex items-center gap-3 justify-between cursor-pointer group hover:bg-white/5 p-1 rounded-xl transition-all"
                       onClick={() => {
                         setHighlightOrderId(order.id);
@@ -1374,19 +1516,43 @@ function AppContent() {
                       }}
                     >
                       <div className="flex items-center gap-3 min-w-0 flex-1">
-                        <div className={`flex-shrink-0 p-2 rounded-xl ${statusInfo.bg}`}>
-                          <StatusIcon className={`w-5 h-5 ${statusInfo.color}`} />
-                        </div>
                         <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-3">
                             <span className="text-white font-bold text-sm">
                               #{order.order_number}
                             </span>
-                            <span className={`text-xs font-bold ${statusInfo.color}`}>
-                              {statusInfo.text}
-                            </span>
+                            <div className="flex items-center gap-2">
+                            <div className={`px-2 py-0.5 rounded-full border flex items-center gap-1.5 ${statusInfo.bg} ${statusInfo.border} ${statusInfo.color}`}>
+                                <span className="font-bold text-[10px] whitespace-nowrap">{statusInfo.text}</span>
+                                <StatusIcon className="w-3.5 h-3.5" />
+                              </div>
+                              {(() => {
+                                const timer = getPickupCountdownMeta(order);
+                                if (!timer) return null;
+                                return (
+                                  <span className={`text-[11px] font-black ${timer.className} ${language === 'ar' ? 'w-16 text-left' : 'w-12 text-right'} inline-block`}>
+                                    {timer.text}
+                                  </span>
+                                );
+                              })()}
+                            </div>
                           </div>
-                          <p className="text-muted text-xs truncate">
+
+                          <div className="h-3 flex items-center">
+                            {(() => {
+                              const timer = getPickupCountdownMeta(order);
+                              const formattedDeadline = timer?.deadlineRaw ? formatDeadline(timer.deadlineRaw as string, language) : '';
+                              if (!formattedDeadline) return null;
+                              return (
+                                <p className="text-[9px] text-muted font-bold leading-none flex items-center gap-1">
+                                  {/* Updated label removed as per user request */}
+                                  {formattedDeadline}
+                                </p>
+                              );
+                            })()}
+                          </div>
+
+                          <p className="text-muted text-[10px] truncate leading-tight">
                             {order.items.map(i => i.item_name).join('، ')}
                           </p>
                         </div>
@@ -1419,7 +1585,7 @@ function AppContent() {
       )}
 
       <main className={`container mx-auto px-4 py-8 ${phoneChrome ? 'pb-24' : 'pb-8'}`}>
-        {loading ? (
+        {loading && categories.length === 0 ? (
           <div className="text-center py-24">
             <div className="animate-spin w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full mx-auto mb-4"></div>
             <p className="text-2xl text-gray-300 font-bold">جاري التحميل...</p>
@@ -1450,6 +1616,14 @@ function AppContent() {
         onUpdateQuantity={handleUpdateQuantity}
         onRemoveItem={handleRemoveItem}
         onCheckout={handleCheckout}
+        editingOrder={editingOrder}
+        onSaveOrderEdit={handleSaveOrderEdit}
+        onCancelOrderEdit={handleCancelOrderEdit}
+        onAcknowledgeUpdate={(itemId) => {
+          setCartItems(prev => prev.map(item => 
+            item.id === itemId ? { ...item, cart_synced_data_changed: false } : item
+          ));
+        }}
         checkoutCartEditMode={checkoutCartEditMode}
         onSaveCheckoutCartEdit={handleSaveCheckoutCartEdit}
         onCancelCheckoutCartEdit={handleCancelCheckoutCartEdit}
@@ -1470,6 +1644,7 @@ function AppContent() {
             availableCoupons={deviceCoupons}
             cartItems={cartItems}
             onConfirm={handleConfirmOrder}
+            orderSubmitting={orderConfirmSubmitting}
             onPhoneValidated={async (phone) => {
               setCustomerPhone(phone);
               await fetchCouponConfigAndCoupons(phone);
@@ -1638,65 +1813,77 @@ function AppContent() {
         customerPhone={customerPhone}
         highlightOrderId={highlightOrderId}
         initialTab={profileInitialTab}
-        onMobileSubflowChange={setHideMobileBottomNav}
+        onPhoneValidated={async (phone) => {
+          setCustomerPhone(phone);
+          await fetchCouponConfigAndCoupons(phone);
+        }}
+        onSettingsViewChange={setProfileSettingsView}
+        onStartOrderEdit={handleStartOrderEdit}
       />
 
-      {phoneChrome && !showCart && cartItems.length === 0 && !hideMobileBottomNav && !isProductImageFullscreen && (
-      <nav className="fixed bottom-0 inset-x-0 z-[75] border-t border-white/10 bg-[hsl(var(--color-surface))] px-2 pt-1 pb-[max(0.4rem,env(safe-area-inset-bottom))]">
-        <div className="grid grid-cols-3 gap-1 max-w-md mx-auto">
-          <button
-            type="button"
-            onClick={() => {
-              setActiveBottomTab('home');
-              setShowProfile(false);
-              setShowCart(false);
-              window.scrollTo({ top: 0, behavior: 'smooth' });
-            }}
-            className={`flex flex-col items-center justify-center gap-1 rounded-xl px-2 py-2 ${activeBottomTab === 'home' ? 'bg-primary/15 text-primary' : 'text-white/80'}`}
-          >
-            <img
-              src="/mx-brand-logo.png"
-              alt="MX"
-              className="h-5 w-5 rounded-full object-cover"
-            />
-            <span className="text-[11px] font-black">{language === 'ar' ? 'الرئيسية' : 'Home'}</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setActiveBottomTab('orders');
-              setProfileInitialTab('orders');
-              setShowProfile(true);
-            }}
-            className={`relative flex flex-col items-center justify-center gap-1 rounded-xl px-2 py-2 ${activeBottomTab === 'orders' ? 'bg-primary/15 text-primary' : 'text-white/80'}`}
-          >
-            <ReceiptText className="h-5 w-5 text-primary" />
-            {ordersCount > 0 && (
-              <span className="absolute right-3 top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-black text-white">
-                {ordersCount > 9 ? '9+' : ordersCount}
-              </span>
-            )}
-            <span className="text-[11px] font-black">{language === 'ar' ? 'طلباتي' : 'Orders'}</span>
-          </button>
-          <button
-            type="button"
-            data-profile-button
-            onClick={() => {
-              setActiveBottomTab('account');
-              setProfileInitialTab('settings');
-              setShowProfile(true);
-            }}
-            className={`flex flex-col items-center justify-center gap-1 rounded-xl px-2 py-2 ${activeBottomTab === 'account' ? 'bg-primary/15 text-primary' : 'text-white/80'}`}
-          >
-            <User className="h-5 w-5 text-primary" />
-            <span className="text-[11px] font-black">{language === 'ar' ? 'الحساب' : 'Account'}</span>
-          </button>
-        </div>
-      </nav>
+      {phoneChrome && (
+        <nav
+          className={`fixed bottom-0 inset-x-0 z-[120] border-t border-white/10 bg-[hsl(var(--color-surface))] px-2 pt-1 pb-[max(0.4rem,env(safe-area-inset-bottom))] transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] ${showCart || showCheckout
+              ? 'translate-y-full'
+              : 'translate-y-0'
+            }`}
+        >
+          <div className="grid grid-cols-3 gap-1 max-w-md mx-auto">
+            <button
+              type="button"
+              onClick={() => {
+                setActiveBottomTab('home');
+                setHighlightOrderId(null);
+                setShowProfile(false);
+                setShowCart(false);
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+              className={`flex flex-col items-center justify-center gap-1 rounded-xl px-2 py-2 ${activeBottomTab === 'home' ? 'bg-primary/15 text-primary' : 'text-white/80'}`}
+            >
+              <img
+                src="/mx-brand-logo.png"
+                alt="MX"
+                className="h-5 w-5 rounded-full object-cover"
+              />
+              <span className="text-[11px] font-black">{language === 'ar' ? 'الرئيسية' : 'Home'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveBottomTab('orders');
+                setProfileInitialTab('orders');
+                setShowProfile(true);
+              }}
+              className={`relative flex flex-col items-center justify-center gap-1 rounded-xl px-2 py-2 ${activeBottomTab === 'orders' ? 'bg-primary/15 text-primary' : 'text-white/80'}`}
+            >
+              <ReceiptText className="h-5 w-5 text-primary" />
+              {ordersCount > 0 && (
+                <span className="absolute right-3 top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-black text-white">
+                  {ordersCount > 9 ? '9+' : ordersCount}
+                </span>
+              )}
+              <span className="text-[11px] font-black">{language === 'ar' ? 'طلباتي' : 'Orders'}</span>
+            </button>
+            <button
+              type="button"
+              data-profile-button
+              onClick={() => {
+                setActiveBottomTab('account');
+                setHighlightOrderId(null);
+                setProfileInitialTab('settings');
+                setShowProfile(true);
+              }}
+              className={`flex flex-col items-center justify-center gap-1 rounded-xl px-2 py-2 ${activeBottomTab === 'account' ? 'bg-primary/15 text-primary' : 'text-white/80'}`}
+            >
+              <User className="h-5 w-5 text-primary" />
+              <span className="text-[11px] font-black">{language === 'ar' ? 'الحساب' : 'Account'}</span>
+            </button>
+          </div>
+        </nav>
       )}
 
       {/* Floating Keyboard Button - Mobile only */}
-      {phoneChrome && !showCart && cartItems.length === 0 && !showCheckout && !showProfile && !orderSuccess && (
+      {phoneChrome && !showCart && cartItems.length === 0 && !showCheckout && !showProfile && !orderSuccess && !isProductImageFullscreen && (
         <button
           onClick={() => {
             if (mobileKeyboardInputRef.current) {
@@ -1809,7 +1996,9 @@ function App() {
     <ThemeProvider>
       <LanguageProvider>
         <AuthProvider>
-          <AppContent />
+          <RealtimeProvider>
+            <AppContent />
+          </RealtimeProvider>
         </AuthProvider>
       </LanguageProvider>
     </ThemeProvider>

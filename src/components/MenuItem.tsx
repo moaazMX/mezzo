@@ -1,7 +1,9 @@
 import { Plus, AlertCircle, Gamepad2, X } from 'lucide-react';
 import { Item } from '../lib/supabase';
 import { useLanguage } from '../contexts/LanguageContext';
-import { useState, useEffect, useLayoutEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import ProgressiveImage from './ProgressiveImage';
 
 interface MenuItemProps {
   item: Item;
@@ -16,23 +18,10 @@ export default function MenuItem({ item, onAddToCart }: MenuItemProps) {
   const [imageBroken, setImageBroken] = useState(false);
   const itemRef = useRef<HTMLDivElement>(null);
   const modalRef = useRef<HTMLDivElement>(null);
-  const heroImgRef = useRef<HTMLImageElement>(null);
-  const modalImgRef = useRef<HTMLImageElement>(null);
 
   useEffect(() => {
     setImageBroken(false);
   }, [item.image_url]);
-
-  useLayoutEffect(() => {
-    const el = heroImgRef.current;
-    if (el?.complete && el.naturalWidth > 0) el.classList.add('is-loaded');
-  }, [item.image_url, imageBroken]);
-
-  useLayoutEffect(() => {
-    if (!showDetails) return;
-    const el = modalImgRef.current;
-    if (el?.complete && el.naturalWidth > 0) el.classList.add('is-loaded');
-  }, [showDetails, item.image_url, imageBroken]);
 
   useEffect(() => {
     if (showDetails) {
@@ -59,25 +48,33 @@ export default function MenuItem({ item, onAddToCart }: MenuItemProps) {
     <>
       <div
         ref={itemRef}
-        className="dark-surface-ignore-theme mx-menu-item group/menu-item relative overflow-hidden rounded-2xl border border-primary/35 bg-[hsl(var(--color-surface))] shadow-md transition-[box-shadow,border-color,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5 hover:border-primary/55 hover:shadow-lg hover:shadow-primary/10 motion-reduce:transition-none motion-reduce:hover:translate-y-0 [@media(hover:none)]:hover:translate-y-0"
+        className="dark-surface-ignore-theme mx-menu-item group/menu-item relative flex flex-col overflow-hidden rounded-2xl border border-primary/35 bg-[hsl(var(--color-surface))] shadow-md transition-[box-shadow,border-color,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5 hover:border-primary/55 hover:shadow-lg hover:shadow-primary/10 motion-reduce:transition-none motion-reduce:hover:translate-y-0 [@media(hover:none)]:hover:translate-y-0 [@media(hover:hover)]:h-full [@media(hover:hover)]:bg-transparent"
       >
-        <button
-          type="button"
-          className="mx-menu-item-btn relative flex w-full cursor-pointer flex-col border-0 bg-transparent p-0 text-right"
+        {/* div+role=button: avoids invalid <button> inside <button> (Add control is a real button). */}
+        <div
+          role="button"
+          tabIndex={0}
+          className="mx-menu-item-btn relative flex flex-1 w-full cursor-pointer flex-col border-0 bg-transparent p-0 text-right outline-none focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[hsl(var(--color-surface))]"
           onClick={() => setShowDetails(true)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              setShowDetails(true);
+            }
+          }}
         >
-          <div className="mx-menu-hero relative aspect-[5/4] w-full min-h-[11.5rem] overflow-hidden bg-black/30 sm:min-h-[13rem] md:aspect-[4/3] md:min-h-[14rem] [@media(max-width:768px)_and_(pointer:coarse)]:aspect-[5/4]">
+          <div className="mx-menu-hero relative aspect-[5/4] w-full min-h-[11.5rem] overflow-hidden bg-black/30 sm:min-h-[13rem] md:aspect-[4/3] md:min-h-[14rem] [@media(max-width:768px)_and_(pointer:coarse)]:aspect-[5/4] [@media(hover:hover)]:aspect-auto [@media(hover:hover)]:flex-1 [@media(hover:hover)]:min-h-0">
             {item.image_url && !imageBroken ? (
-              <img
-                ref={heroImgRef}
+              <ProgressiveImage
                 src={item.image_url}
                 alt={item.name}
+                preset="card"
+                upgradeOnMount
                 loading="lazy"
-                decoding="async"
-                referrerPolicy="no-referrer"
-                onLoad={(e) => e.currentTarget.classList.add('is-loaded')}
-                onError={() => setImageBroken(true)}
-                className="menu-item-hero img-fade h-full w-full object-cover transition-transform duration-[900ms] ease-[cubic-bezier(0.22,1,0.36,1)] group-hover/menu-item:scale-[1.025] motion-reduce:transition-none motion-reduce:group-hover/menu-item:scale-100 [@media(hover:none)]:scale-100"
+                fetchPriority="low"
+                wrapperClassName="h-full w-full"
+                onImageError={() => setImageBroken(true)}
+                className="menu-item-hero h-full w-full object-cover transition-transform duration-[900ms] ease-[cubic-bezier(0.22,1,0.36,1)] group-hover/menu-item:scale-[1.025] motion-reduce:transition-none motion-reduce:group-hover/menu-item:scale-100 [@media(hover:none)]:scale-100"
               />
             ) : (
               <div className="flex h-full w-full items-center justify-center bg-surface">
@@ -101,7 +98,7 @@ export default function MenuItem({ item, onAddToCart }: MenuItemProps) {
             )}
           </div>
 
-          <div className="mx-menu-meta space-y-1.5 border-t border-primary/25 bg-[hsl(var(--color-surface))] px-3 py-2.5 text-right sm:px-3.5 sm:py-3">
+          <div className="mx-menu-meta space-y-1.5 border-t border-primary/25 bg-[hsl(var(--color-surface))] px-3 py-2.5 text-right sm:px-3.5 sm:py-3 [@media(hover:hover)]:bg-transparent [@media(hover:hover)]:border-t-0 [@media(hover:hover)]:pb-14">
             <h3 className="line-clamp-2 text-sm font-black leading-tight text-white sm:text-base">
               {title}
             </h3>
@@ -113,38 +110,41 @@ export default function MenuItem({ item, onAddToCart }: MenuItemProps) {
                 {description}
               </p>
             )}
-            <div className="flex items-end justify-between gap-2 pt-1">
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (item.is_available) onAddToCart(item, itemRef);
-                }}
-                disabled={!item.is_available}
-                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary text-white shadow-md transition-[transform,background-color] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] hover:bg-primary/90 active:scale-95 disabled:cursor-not-allowed disabled:bg-gray-600 sm:h-11 sm:w-11 motion-reduce:transition-none"
-                title={t('menuItem.addToCart')}
-              >
-                <Plus className="h-5 w-5 sm:h-6 sm:w-6" strokeWidth={2.5} />
-              </button>
-              <div className="min-w-0 text-end">
-                {item.has_offer && item.offer_price && (
-                  <span className="text-[10px] text-white/45 line-through sm:text-xs">
-                    {item.price} {currencySymbol}
-                  </span>
-                )}
-                <p className="text-lg font-black text-primary sm:text-xl">
-                  {displayPrice}{' '}
-                  <span className="text-xs font-bold sm:text-sm">{currencySymbol}</span>
-                </p>
-              </div>
-            </div>
           </div>
-        </button>
+        </div>
+        <div className="flex items-end justify-between gap-2 bg-[hsl(var(--color-surface))] px-3 pb-2.5 pt-1 sm:px-3.5 sm:pb-3 [@media(hover:hover)]:absolute [@media(hover:hover)]:bottom-0 [@media(hover:hover)]:inset-x-0 [@media(hover:hover)]:bg-transparent [@media(hover:hover)]:border-t-0 [@media(hover:hover)]:z-20">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (item.is_available) onAddToCart(item, itemRef);
+            }}
+            disabled={!item.is_available}
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary text-white shadow-md transition-[transform,background-color] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] hover:bg-primary/90 active:scale-95 disabled:cursor-not-allowed disabled:bg-gray-600 sm:h-11 sm:w-11 motion-reduce:transition-none"
+            title={t('menuItem.addToCart')}
+          >
+            <Plus className="h-5 w-5 sm:h-6 sm:w-6" strokeWidth={2.5} />
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowDetails(true)}
+            className="min-w-0 text-end border-0 bg-transparent p-0 outline-none focus-visible:ring-2 focus-visible:ring-primary/50 rounded-lg"
+          >
+            {item.has_offer && item.offer_price && (
+              <span className="text-[10px] text-white/45 line-through sm:text-xs">
+                {item.price} {currencySymbol}
+              </span>
+            )}
+            <p className="text-lg font-black text-primary sm:text-xl">
+              {displayPrice}{' '}
+              <span className="text-xs font-bold sm:text-sm">{currencySymbol}</span>
+            </p>
+          </button>
+        </div>
       </div>
-
-      {showDetails && (
+      {showDetails && createPortal(
         <div
-          className="fixed inset-0 z-[70] flex justify-center bg-black/88 backdrop-blur-[3px] [@media(hover:none)]:items-stretch [@media(hover:hover)]:items-center [@media(hover:hover)]:p-5 [@media(hover:hover)]:lg:p-8"
+          className="fixed inset-0 z-[150] flex justify-center bg-black/88 backdrop-blur-[3px] [@media(hover:none)]:items-stretch [@media(hover:hover)]:items-center [@media(hover:hover)]:p-5 [@media(hover:hover)]:lg:p-8"
           onClick={() => setShowDetails(false)}
         >
           <div
@@ -165,16 +165,15 @@ export default function MenuItem({ item, onAddToCart }: MenuItemProps) {
               <div className="relative w-full shrink-0 bg-black">
                 <div className="aspect-[4/3] w-full min-h-[min(58vh,420px)] max-h-[68vh] [@media(hover:hover)]:aspect-[16/10] [@media(hover:hover)]:min-h-0 [@media(hover:hover)]:max-h-[min(62vh,560px)]">
                   {item.image_url && !imageBroken ? (
-                    <img
-                      ref={modalImgRef}
+                    <ProgressiveImage
                       src={item.image_url}
                       alt={item.name}
+                      upgradeOnMount
                       loading="eager"
-                      decoding="async"
-                      referrerPolicy="no-referrer"
-                      onLoad={(e) => e.currentTarget.classList.add('is-loaded')}
-                      onError={() => setImageBroken(true)}
-                      className="img-fade h-full w-full object-cover object-center [@media(hover:hover)]:rounded-t-[1.85rem]"
+                      fetchPriority="high"
+                      wrapperClassName="h-full w-full"
+                      onImageError={() => setImageBroken(true)}
+                      className="h-full w-full object-cover object-center [@media(hover:hover)]:rounded-t-[1.85rem]"
                     />
                   ) : (
                     <div className="flex h-full w-full items-center justify-center bg-surface">
@@ -226,17 +225,11 @@ export default function MenuItem({ item, onAddToCart }: MenuItemProps) {
               </div>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       <style>{`
-        .img-fade {
-          opacity: 0;
-          transition: opacity 260ms ease-in;
-        }
-        .img-fade.is-loaded {
-          opacity: 1;
-        }
         .custom-scrollbar {
           scrollbar-width: thin;
           scrollbar-color: rgba(139, 92, 246, 0.45) transparent;
