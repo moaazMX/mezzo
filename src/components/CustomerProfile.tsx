@@ -4,7 +4,8 @@ import { CheckCircle, X, Package, Clock, Truck, AlertTriangle, StickyNote, Globe
 import MobileMapEditor from './MobileMapEditor';
 import { saveSharedAddress, getSharedAddress, subscribeToAddressSync, saveSharedAddressTabs, getSharedAddressTabs } from '../lib/addressSync';
 import { fetchDeliveryZonesAndServices } from '../lib/deliveryMatch';
-import { supabase, Order, OrderItem, CustomerNote, Customer, DeviceCoupon, CustomerData, SavedAddressTab, AddressType, DeliveryZone, DeliveryService } from '../lib/supabase';
+import { supabase, Order, OrderItem, Item, CustomerNote, Customer, DeviceCoupon, CustomerData, SavedAddressTab, AddressType, DeliveryZone, DeliveryService } from '../lib/supabase';
+import { buildCatalogLookup, resolveOrderItemNames, type CatalogLookup } from '../lib/itemDisplayName';
 import { getOrCreateDeviceFingerprint } from '../lib/deviceFingerprint';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useTheme } from '../contexts/ThemeContext';
@@ -25,6 +26,7 @@ interface CustomerProfileProps {
   onPhoneValidated?: (phone: string) => void | Promise<void>;
   onSettingsViewChange?: (view: string) => void;
   onStartOrderEdit?: (order: OrderWithDetails) => void;
+  catalogItems?: Item[];
 }
 
 interface OrderWithDetails extends Order {
@@ -32,6 +34,121 @@ interface OrderWithDetails extends Order {
   notes: CustomerNote[];
   customer?: Customer | null;
   isArchived?: boolean;
+}
+
+type PickupActionMeta = { showPickupAction: boolean; pickupActionType: 'add' | 'edit' };
+
+function getOrderPickupActionMeta(order: Order): PickupActionMeta {
+  const isPickup = order.delivery_method === 'pickup';
+  const isUnderReview = order.status === 'under_review';
+  const deadline = order.pickup_deadline_at ? new Date(order.pickup_deadline_at).getTime() : 0;
+  const hasDeadline = deadline > 0;
+  let showPickupAction = false;
+  let pickupActionType: 'add' | 'edit' = 'add';
+  if (isUnderReview) {
+    showPickupAction = true;
+    pickupActionType = (isPickup && hasDeadline) ? 'edit' : 'add';
+  } else if (isPickup && hasDeadline) {
+    const now = Date.now();
+    const diffHours = (deadline - now) / (1000 * 60 * 60);
+    const updatedAt = order.pickup_deadline_updated_at
+      ? new Date(order.pickup_deadline_updated_at).getTime()
+      : new Date(order.created_at).getTime();
+    const minsSinceUpdate = (now - updatedAt) / (1000 * 60);
+    if (diffHours > 1 || minsSinceUpdate <= 30) {
+      showPickupAction = true;
+      pickupActionType = 'edit';
+    }
+  }
+  return { showPickupAction, pickupActionType };
+}
+
+interface OrderOptionsDropdownProps {
+  order: OrderWithDetails;
+  language: 'ar' | 'en';
+  isOpen: boolean;
+  onClose: () => void;
+  onPickupTime: () => void;
+  onEditOrder: () => void;
+  onCancelOrder: () => void;
+  onEditNote: () => void;
+  overlayZClass?: string;
+  menuZClass?: string;
+}
+
+function OrderOptionsDropdown({
+  order,
+  language,
+  isOpen,
+  onClose,
+  onPickupTime,
+  onEditOrder,
+  onCancelOrder,
+  onEditNote,
+  overlayZClass = 'z-[100]',
+  menuZClass = 'z-[101]',
+}: OrderOptionsDropdownProps) {
+  if (!isOpen) return null;
+  const isAr = language === 'ar';
+  const { showPickupAction, pickupActionType } = getOrderPickupActionMeta(order);
+
+  return (
+    <>
+      <div
+        className={`fixed inset-0 ${overlayZClass}`}
+        onClick={(e) => { e.stopPropagation(); onClose(); }}
+      />
+      <div
+        dir={isAr ? 'rtl' : 'ltr'}
+        className={`absolute top-full mt-2 ${isAr ? 'left-0' : 'right-0'} w-[min(280px,calc(100vw-2rem))] ${menuZClass} bg-dark border border-primary/30 rounded-xl shadow-2xl overflow-hidden flex flex-col origin-top animate-in fade-in slide-in-from-top-2 duration-200`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 shrink-0">
+          <h3 className="text-sm font-black text-white">{isAr ? 'خيارات الطلب' : 'Order Options'}</h3>
+        </div>
+        <div className="py-1">
+          {showPickupAction && (
+            <button
+              type="button"
+              onClick={() => { onPickupTime(); onClose(); }}
+              className="w-full px-4 py-3.5 flex items-center gap-3 hover:bg-primary/10 transition-colors text-white text-sm font-bold"
+            >
+              <Clock className="w-4 h-4 text-primary shrink-0" />
+              <span>{pickupActionType === 'add' ? (isAr ? 'إضافة موعد الاستلام' : 'Add Pickup Time') : (isAr ? 'تعديل موعد الاستلام' : 'Change Pickup Time')}</span>
+            </button>
+          )}
+          {(order.status === 'under_review' || order.status === 'preparing') && (
+            <button
+              type="button"
+              onClick={() => { onEditOrder(); onClose(); }}
+              className="w-full px-4 py-3.5 flex items-center gap-3 hover:bg-primary/10 transition-colors text-white text-sm font-bold"
+            >
+              <Edit2 className="w-4 h-4 text-primary shrink-0" />
+              <span>{isAr ? 'تعديل الطلب' : 'Edit Order'}</span>
+            </button>
+          )}
+          {order.status === 'under_review' && (
+            <button
+              type="button"
+              onClick={() => { onCancelOrder(); onClose(); }}
+              className="w-full px-4 py-3.5 flex items-center gap-3 hover:bg-red-500/10 transition-colors text-red-400 text-sm font-bold"
+            >
+              <XCircle className="w-4 h-4 shrink-0" />
+              <span>{isAr ? 'إلغاء الطلب' : 'Cancel Order'}</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => { onEditNote(); onClose(); }}
+            className="w-full px-4 py-3.5 flex items-center gap-3 hover:bg-primary/10 transition-colors text-white text-sm font-bold"
+          >
+            <MessageSquare className="w-4 h-4 text-primary shrink-0" />
+            <span>{order.order_note?.trim() ? (isAr ? 'تعديل الملاحظة' : 'Edit Note') : (isAr ? 'أضف ملاحظة' : 'Add Note')}</span>
+          </button>
+        </div>
+      </div>
+    </>
+  );
 }
 
 function normalizeSavedAddressLabelKey(label: string): string {
@@ -65,9 +182,222 @@ function allocateUniqueSavedAddressLabel(rawLabel: string, savedTabs: SavedAddre
 }
 
 
-export default function CustomerProfile({ isOpen, onClose, customerPhone, highlightOrderId, initialTab = 'settings', onPhoneValidated, onSettingsViewChange, onStartOrderEdit }: CustomerProfileProps) {
+
+function OrderTimeline({ order, language }: { order: any; language: 'ar' | 'en' }) {
+  const isPickup = order.delivery_method === 'pickup';
+
+  const deliverySteps = [
+    { status: 'under_review', label: language === 'ar' ? 'المعالجة' : 'Processing', icon: Clock },
+    { status: 'preparing', label: language === 'ar' ? 'قيد التحضير' : 'Preparing', icon: Package },
+    { status: 'on_way', label: language === 'ar' ? 'في الطريق' : 'On the Way', icon: Truck },
+    { status: 'completed', label: language === 'ar' ? 'تم التسليم' : 'Delivered', icon: CheckCircle }
+  ];
+
+  const pickupSteps = [
+    { status: 'under_review', label: language === 'ar' ? 'قيد المعاينة' : 'Under Review', icon: Clock },
+    { status: 'preparing', label: language === 'ar' ? 'قيد التحضير' : 'Preparing', icon: Package },
+    { status: 'arrived', label: language === 'ar' ? 'تم التحضير' : 'Ready', icon: CheckCircle },
+    { status: 'completed', label: language === 'ar' ? 'تم التسليم' : 'Delivered', icon: CheckCircle }
+  ];
+
+  const steps = isPickup ? pickupSteps : deliverySteps;
+  const currentIndex = steps.findIndex(s => s.status === order.status);
+
+  // If order is cancelled/rejected, we don't show normal timeline, or we show it greyed out
+  if (order.status === 'cancelled' || order.status === 'rejected') {
+    return (
+      <div className="py-4 flex flex-col items-center justify-center opacity-70">
+        <XCircle className="w-12 h-12 text-red-500 mb-2" />
+        <p className="text-red-500 font-bold">{language === 'ar' ? 'الطلب ملغي' : 'Order Cancelled'}</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative py-4 px-2 select-none" dir={language === 'ar' ? 'rtl' : 'ltr'}>
+      {steps.map((step, idx) => {
+        const isCompleted = currentIndex >= idx;
+        const isCurrent = currentIndex === idx;
+        const Icon = step.icon;
+
+        return (
+          <div key={step.status} className="flex items-start mb-6 relative">
+            {/* Vertical Line */}
+            {idx < steps.length - 1 && (
+              <div className={`absolute top-10 bottom-[-24px] w-0.5 transition-colors duration-500 ${language === 'ar' ? 'right-6' : 'left-6'} ${currentIndex > idx ? 'bg-primary' : 'bg-primary/20 border-dashed border-l border-primary/40'}`}></div>
+            )}
+
+            <div className={`relative z-10 flex items-center justify-center w-12 h-12 rounded-full transition-all duration-500 border-4 ${isCurrent ? 'bg-primary border-primary/20 shadow-[0_0_15px_rgba(var(--color-primary),0.5)] scale-110' : isCompleted ? 'bg-primary border-transparent' : 'bg-dark border-primary/30'}`}>
+              <Icon className={`w-5 h-5 transition-colors duration-500 ${isCurrent || isCompleted ? 'text-white' : 'text-gray-500'}`} />
+            </div>
+
+            <div className={`flex-1 transition-all duration-500 ${language === 'ar' ? 'pr-4' : 'pl-4'} pt-3`}>
+              <div className="flex items-center gap-3">
+                <h4 className={`text-sm font-bold transition-colors duration-500 ${isCurrent ? 'text-white' : isCompleted ? 'text-gray-300' : 'text-gray-500'}`}>
+                  {step.label}
+                </h4>
+                {step.status === 'under_review' && order.created_at && (
+                  <span className="text-[10px] text-gray-400 font-bold bg-white/5 px-2 py-0.5 rounded" dir="ltr">
+                    {new Date(order.created_at).toLocaleTimeString(language === 'ar' ? 'ar-EG' : 'en-US', { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                )}
+                {step.status !== 'under_review' && isCompleted && order.updated_at && (
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${isCurrent ? 'text-primary bg-primary/10' : 'text-gray-400 bg-white/5'}`} dir="ltr">
+                    {new Date(order.updated_at).toLocaleTimeString(language === 'ar' ? 'ar-EG' : 'en-US', { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+
+function OrderItemsSlider({ items, language, catalog }: { items: OrderItem[]; language: 'ar' | 'en'; catalog?: CatalogLookup }) {
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const itemsPerSlide = 3;
+  const totalSlides = Math.ceil(items.length / itemsPerSlide);
+
+  const slides = Array.from({ length: totalSlides }, (_, i) => 
+    items.slice(i * itemsPerSlide, (i + 1) * itemsPerSlide)
+  );
+
+  const handleScroll = () => {
+    if (!scrollRef.current) return;
+    const { scrollLeft, clientWidth } = scrollRef.current;
+    const index = Math.round(Math.abs(scrollLeft) / clientWidth);
+    setCurrentIndex(index);
+  };
+
+  const scrollToSlide = (index: number) => {
+    if (!scrollRef.current) return;
+    const child = scrollRef.current.children[index] as HTMLElement;
+    if (child) {
+      child.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'start' });
+    }
+  };
+
+  if (items.length === 0) return null;
+
+  const hasItemsLeft = language === 'ar' ? currentIndex < totalSlides - 1 : currentIndex > 0;
+  const hasItemsRight = language === 'ar' ? currentIndex > 0 : currentIndex < totalSlides - 1;
+
+  const goLeft = () => {
+    const nextIndex = language === 'ar' ? currentIndex + 1 : currentIndex - 1;
+    if (nextIndex >= 0 && nextIndex < totalSlides) scrollToSlide(nextIndex);
+  };
+
+  const goRight = () => {
+    const nextIndex = language === 'ar' ? currentIndex - 1 : currentIndex + 1;
+    if (nextIndex >= 0 && nextIndex < totalSlides) scrollToSlide(nextIndex);
+  };
+
+  return (
+    <div className="flex flex-col mb-6">
+      <style>{`
+        .hide-scrollbar::-webkit-scrollbar {
+          display: none;
+        }
+      `}</style>
+      <div className="flex justify-between items-center mb-3 px-1" dir="ltr">
+        <div className="w-8 shrink-0">
+          <button 
+            onClick={goLeft}
+            disabled={!(totalSlides > 1 && hasItemsLeft)}
+            className={`p-1 rounded-full transition-colors ${
+              totalSlides > 1 && hasItemsLeft 
+                ? 'bg-primary/20 text-primary hover:bg-primary/30' 
+                : 'opacity-0 cursor-default pointer-events-none'
+            }`}
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+        </div>
+        
+        <h3 className="text-sm font-black text-white flex-1 text-center" dir={language === 'ar' ? 'rtl' : 'ltr'}>
+          {language === 'ar' ? 'الأصناف' : 'Items'}
+        </h3>
+        
+        <div className="w-8 shrink-0 flex justify-end">
+          <button 
+            onClick={goRight}
+            disabled={!(totalSlides > 1 && hasItemsRight)}
+            className={`p-1 rounded-full transition-colors ${
+              totalSlides > 1 && hasItemsRight 
+                ? 'bg-primary/20 text-primary hover:bg-primary/30' 
+                : 'opacity-0 cursor-default pointer-events-none'
+            }`}
+          >
+            <ChevronRight className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      <div 
+        ref={scrollRef}
+        onScroll={handleScroll}
+        className="flex overflow-x-auto snap-x snap-mandatory hide-scrollbar -mx-1"
+        style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
+      >
+        {slides.map((slideItems, slideIdx) => (
+          <div key={slideIdx} className="w-full shrink-0 snap-center px-1">
+            <div className="space-y-3">
+              {slideItems.map(item => {
+                const { title, subtitle } = resolveOrderItemNames(item, language, catalog);
+                return (
+                <div key={item.id} className="flex gap-4 p-3 bg-white/5 rounded-2xl border border-white/5">
+                  <div className="w-16 h-16 rounded-xl bg-dark/50 border border-white/10 overflow-hidden shrink-0 flex items-center justify-center p-1">
+                    {item.image_url ? (
+                      <img src={item.image_url} alt={title} className="w-full h-full object-cover rounded-lg" />
+                    ) : (
+                      <Package className="w-6 h-6 text-white/20" />
+                    )}
+                  </div>
+                  <div className="flex-1 py-1 flex flex-col justify-between text-start">
+                    <div className="flex justify-between items-start gap-2">
+                      <div className="min-w-0">
+                        <span className="font-bold text-white text-sm line-clamp-2 block">{title}</span>
+                        {subtitle && (
+                          <span className="text-[10px] text-gray-400 line-clamp-1 block mt-0.5">{subtitle}</span>
+                        )}
+                      </div>
+                      <span className="font-black text-primary bg-primary/10 px-2 py-0.5 rounded text-sm shrink-0 block mr-2" dir="ltr">x{item.quantity}</span>
+                    </div>
+                    <span className="font-bold text-white block mt-2 text-start">{item.subtotal} <span className="text-[10px] text-gray-400">{language === 'ar' ? 'ج' : 'EG'}</span></span>
+                  </div>
+                </div>
+              );})}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {totalSlides > 1 && (
+        <div className="flex justify-center gap-1.5 mt-4" dir="ltr">
+          {Array.from({ length: totalSlides }).map((_, idx) => (
+            <div 
+              key={idx}
+              className={`h-1.5 rounded-full transition-all duration-300 ${
+                (language === 'ar' ? (totalSlides - 1 - currentIndex) : currentIndex) === idx ? 'w-4 bg-primary' : 'w-1.5 bg-white/20'
+              }`}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+export default function CustomerProfile({ isOpen, onClose, customerPhone, highlightOrderId, initialTab = 'settings', onPhoneValidated, onSettingsViewChange, onStartOrderEdit, catalogItems = [] }: CustomerProfileProps) {
   const { language, setLanguage } = useLanguage();
   const { theme, toggleTheme } = useTheme();
+  const catalogLookup = buildCatalogLookup(catalogItems);
   const [orders, setOrders] = useState<OrderWithDetails[]>([]);
   const [loading, setLoading] = useState(true);
   const hasLoadedOrdersRef = useRef(false);
@@ -83,6 +413,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
   const [showActionMenu, setShowActionMenu] = useState<string | null>(null);
   const [menuPosition, setMenuPosition] = useState<{ top: number; left?: number; right?: number }>({ top: 80, left: 16 });
   const [activeHighlightId, setActiveHighlightId] = useState<string | null>(null);
+  const [fullScreenOrderId, setFullScreenOrderId] = useState<string | null>(null);
 
   const [profileCustomerId, setProfileCustomerId] = useState<string | null>(null);
   const [profileCustomer, setProfileCustomer] = useState<Partial<Customer> | null>(null);
@@ -281,6 +612,10 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
     const t = window.setInterval(() => setPickupTimerNow(Date.now()), 1000);
     return () => window.clearInterval(t);
   }, []);
+
+  useEffect(() => {
+    if (!fullScreenOrderId) setShowActionMenu(null);
+  }, [fullScreenOrderId]);
 
   useEffect(() => {
     if (!isOpen || phoneChrome) return;
@@ -721,7 +1056,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
           ordersData.map(async (order) => {
             const { data: items } = await supabase
               .from('order_items')
-              .select('*')
+              .select('*, items:item_id (image_url)')
               .eq('order_id', order.id);
 
             const { data: notes } = await supabase
@@ -731,7 +1066,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
 
             return {
               ...order,
-              items: items || [],
+              items: items ? items.map((it: any) => ({ ...it, image_url: it.items?.image_url })) : [],
               notes: (notes || []).filter((note) => note.created_by === 'customer' || note.is_public !== false),
               isArchived: false
             } as OrderWithDetails;
@@ -781,7 +1116,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
             return {
               ...order,
               id: order.id,
-              items: items || [],
+              items: items ? items.map((it: any) => ({ ...it, image_url: it.items?.image_url })) : [],
               notes: (notes || []).filter((note) => note.created_by === 'customer' || note.is_public !== false),
               customer: customer,
               isArchived: true,
@@ -992,19 +1327,48 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
     };
   };
 
+  // Returns a human-readable "متبقي X" string from a deadline timestamp
+  const getRemainingLabel = (deadlineRaw: string | null | undefined, lang: 'ar' | 'en'): string | null => {
+    if (!deadlineRaw) return null;
+    const deadlineMs = new Date(deadlineRaw).getTime();
+    if (Number.isNaN(deadlineMs)) return null;
+    const diff = deadlineMs - Date.now();
+    if (diff <= 0) return lang === 'ar' ? 'انتهى الوقت' : 'Time up';
+    const totalMins = Math.floor(diff / 60000);
+    const totalHours = Math.floor(totalMins / 60);
+    if (lang === 'ar') {
+      if (totalHours >= 1) {
+        if (totalHours === 1) return 'متبقي ساعة';
+        if (totalHours === 2) return 'متبقي ساعتان';
+        if (totalHours >= 3 && totalHours <= 10) return `متبقي ${totalHours} ساعات`;
+        return `متبقي ${totalHours} ساعة`;
+      }
+      if (totalMins <= 0) return 'انتهى الوقت';
+      if (totalMins === 1) return 'متبقي دقيقة';
+      if (totalMins === 2) return 'متبقي دقيقتان';
+      if (totalMins >= 3 && totalMins <= 10) return `متبقي ${totalMins} دقائق`;
+      return `متبقي ${totalMins} دقيقة`;
+    } else {
+      if (totalHours >= 1) return totalHours === 1 ? '1 hr left' : `${totalHours} hrs left`;
+      if (totalMins <= 0) return 'Time up';
+      if (totalMins === 1) return '1 min left';
+      return `${totalMins} mins left`;
+    }
+  };
+
   const handleCancelOrder = async (orderId: string) => {
     const reason = cancelReason.trim();
-    if (!reason) {
-      setSecErr(language === 'ar' ? 'الرجاء كتابة سبب الإلغاء' : 'Please provide a cancellation reason');
-      return;
-    }
+    if (!reason) return;
 
     try {
+      const order = orders.find(o => o.id === orderId);
+      const stage = order ? order.status : null;
       const { error } = await supabase
         .from('orders')
         .update({
           status: 'cancellation_pending',
           cancellation_reason: reason,
+          cancellation_stage: stage,
           updated_at: new Date().toISOString()
         } as any)
         .eq('id', orderId);
@@ -1015,6 +1379,24 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
       await fetchOrders();
     } catch (err) {
       console.error('Error requesting cancellation:', err);
+    }
+  };
+
+  const handleSaveNote = async (orderId: string) => {
+    try {
+      const noteToSave = editedNote.trim();
+      const { error } = await supabase
+        .from('orders')
+        .update({ order_note: noteToSave })
+        .eq('id', orderId);
+
+      if (error) throw error;
+      setEditingNoteOrderId(null);
+      setEditedNote('');
+      await fetchOrders();
+    } catch (err) {
+      console.error('Error updating note:', err);
+      alert(language === 'ar' ? 'حدث خطأ أثناء تحديث الملاحظة' : 'Error updating note');
     }
   };
 
@@ -1136,7 +1518,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
       <div
         className={`pointer-events-auto flex flex-col overflow-hidden shadow-2xl ${phoneChrome
           ? 'profile-dropdown-phone h-full w-full max-w-none flex-1 rounded-none'
-          : `profile-dropdown-desktop relative h-auto max-h-[min(88vh,860px)] w-full ${activeTab === 'orders' ? 'max-w-5xl' : 'max-w-2xl'
+          : `profile-dropdown-desktop relative h-auto max-h-[min(88vh,860px)] w-full ${activeTab === 'orders' && !fullScreenOrderId ? 'max-w-5xl' : 'max-w-2xl'
           } rounded-[1.85rem] border-2 border-primary/45`
           }`}
         onClick={(e) => e.stopPropagation()}
@@ -1146,23 +1528,63 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
           className={`flex min-h-0 flex-1 flex-col overflow-hidden bg-dark ${phoneChrome ? 'rounded-none border-0' : 'rounded-[1.85rem] border-2 border-primary'
             }`}
         >
-          <div className="flex h-12 items-center justify-between border-b border-white/5 bg-dark px-4 backdrop-blur-md">
-            <div className="w-8" />
+          <div className={`flex h-12 items-center justify-between border-b border-white/5 bg-dark px-4 ${fullScreenOrderId ? 'relative z-20 overflow-visible' : ''}`}>
+            {fullScreenOrderId ? (
+              <button
+                onClick={() => setFullScreenOrderId(null)}
+                className="h-9 w-9 flex items-center justify-center rounded-full bg-white/10 text-white shadow-sm backdrop-blur-sm transition-colors hover:bg-white/20 focus:outline-none shrink-0"
+                  >
+                    {language === 'ar' ? <ChevronRight className="h-5 w-5" /> : <ChevronLeft className="h-5 w-5" />}
+                  </button>
+            ) : (
+              <div className="w-8" />
+            )}
             <h2 className="text-base font-black text-white">
-              {activeTab === 'orders'
-                ? (language === 'ar' ? 'طلباتي' : 'My Orders')
-                : (language === 'ar' ? 'الملف الشخصي' : 'Profile')}
+              {fullScreenOrderId
+                ? (language === 'ar' ? 'تفاصيل الطلب' : 'Order Details')
+                : activeTab === 'orders'
+                  ? (language === 'ar' ? 'طلباتي' : 'My Orders')
+                  : (language === 'ar' ? 'الملف الشخصي' : 'Profile')}
             </h2>
-            <div className="w-8" />
+            {fullScreenOrderId ? (
+              (() => {
+                const detailOrder = orders.find(o => o.id === fullScreenOrderId);
+                if (!detailOrder || ['completed', 'cancelled', 'rejected'].includes(detailOrder.status)) {
+                  return <div className="w-8" />;
+                }
+                return (
+                  <div className="relative">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowActionMenu(showActionMenu === detailOrder.id ? null : detailOrder.id);
+                      }}
+                      className="p-2 bg-primary/10 hover:bg-primary/20 rounded-xl transition-colors text-primary"
+                    >
+                      <Edit2 className="w-5 h-5" />
+                    </button>
+                    <OrderOptionsDropdown
+                      order={detailOrder}
+                      language={language}
+                      isOpen={showActionMenu === detailOrder.id}
+                      onClose={() => setShowActionMenu(null)}
+                      onPickupTime={() => setShowUpdateTimePicker(detailOrder.id)}
+                      onEditOrder={() => onStartOrderEdit?.(detailOrder)}
+                      onCancelOrder={() => { setCancelOrderId(detailOrder.id); setCancelReason(''); }}
+                      onEditNote={() => { setEditingNoteOrderId(detailOrder.id); setEditedNote(detailOrder.order_note || ''); }}
+                    />
+                  </div>
+                );
+              })()
+            ) : (
+              <div className="w-8" />
+            )}
           </div>
 
-          <div
-            className={`custom-scrollbar flex-1 overflow-y-auto p-4 ${phoneChrome ? 'min-h-0 max-h-none' : 'max-h-[calc(85vh-80px)]'
-              }`}
-          >
-            {!phoneChrome && (
+          {!fullScreenOrderId && !phoneChrome && (
+            <div className="px-4 pt-4 pb-2 border-b border-white/5 bg-dark shrink-0">
               <div
-                className={`mb-6 grid h-11 gap-2 rounded-xl border border-primary/40 bg-dark/60 p-1 ${activeTab === 'orders' ? 'grid-cols-[1.35fr_1fr]' : 'grid-cols-[1fr_1.35fr]'
+                className={`grid h-11 gap-2 rounded-xl border border-primary/40 bg-dark/60 p-1 ${activeTab === 'orders' ? 'grid-cols-[1.35fr_1fr]' : 'grid-cols-[1fr_1.35fr]'
                   }`}
               >
                 <button
@@ -1189,10 +1611,103 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                   {language === 'ar' ? 'الحساب' : 'Account'}
                 </button>
               </div>
-            )}
+            </div>
+          )}
 
-            {activeTab === 'settings' && (
-              <div className="space-y-6">
+          <div
+            className={`custom-scrollbar flex-1 overflow-y-auto px-4 pb-4 pt-2 ${phoneChrome ? 'min-h-0 max-h-none' : 'max-h-[calc(85vh-80px)]'
+              }`}
+          >
+            {/* Order Detail View */}
+            {fullScreenOrderId && (() => {
+              const order = orders.find(o => o.id === fullScreenOrderId);
+              if (!order) return null;
+              const itemsTotal = order.items.reduce((sum, item) => sum + item.subtotal, 0);
+              const discount = order.applied_coupon_discount_percent
+                ? Math.round((itemsTotal * order.applied_coupon_discount_percent) / 100)
+                : 0;
+              const deliveryFee = order.total_amount - (itemsTotal - discount);
+              return (
+                <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-300" dir={language === 'ar' ? 'rtl' : 'ltr'}>
+                  {/* Header Card */}
+                  <div className="bg-primary/10 rounded-2xl p-4 border border-primary/20 text-center relative overflow-hidden">
+                    <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-primary/50 to-transparent"></div>
+                    <p className="text-primary text-xs font-bold mb-1">{language === 'ar' ? 'رقم الطلب' : 'Order ID'}</p>
+                    <p className="text-3xl font-black text-white tracking-wider">#{order.order_number}</p>
+                    {(() => {
+                      const timer = getPickupTimerMeta(order);
+                      const remainingLabel = getRemainingLabel(timer?.deadlineRaw, language);
+                      if (!timer || !remainingLabel) return null;
+                      return (
+                        <div className="mt-3 inline-flex items-center justify-center gap-2 bg-primary/20 px-3 py-1.5 rounded-lg border border-primary/30">
+                          <Clock className={`w-4 h-4 ${timer.expired ? 'text-red-400' : 'text-primary'}`} />
+                          <span className={`text-sm font-bold ${timer.expired ? 'text-red-400' : 'text-white'}`}>{remainingLabel}</span>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                  {/* Items */}
+                  <OrderItemsSlider items={order.items} language={language} catalog={catalogLookup} />
+                  {/* Timeline */}
+                  <div className="bg-dark/40 rounded-2xl p-4 border border-primary/10">
+                    <h3 className="text-sm font-black text-white mb-3 px-1">{language === 'ar' ? 'حالة الطلب' : 'Order Status'}</h3>
+                    <OrderTimeline order={order} language={language} />
+                  </div>
+                  {/* Operator Note Display */}
+                  {order.notes && order.notes.length > 0 && (
+                    <div className="bg-yellow-900/20 border border-yellow-500/50 rounded-lg p-3 flex flex-col items-end gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-yellow-300 font-bold">{language === 'ar' ? 'ملاحظة الأوبراتور:' : 'Operator Note:'}</span>
+                        <StickyNote className="w-4 h-4 text-yellow-300" />
+                      </div>
+                      {order.notes.map(note => (
+                        <p key={note.id} className="text-xs text-yellow-200 text-start">{note.note}</p>
+                      ))}
+                    </div>
+                  )}
+                  {/* Customer Order Note Display */}
+                  {order.order_note && (
+                    <div className="bg-primary/10 border border-primary/20 rounded-xl p-3 flex items-start gap-3">
+                      <StickyNote className="w-4 h-4 text-primary mt-0.5" />
+                      <div className="flex-1">
+                        <p className="text-[10px] text-primary/60 font-bold mb-1 text-start">{language === 'ar' ? 'ملاحظة الطلب:' : 'Order Note:'}</p>
+                        <p className="text-xs text-white text-start">{order.order_note}</p>
+                      </div>
+                    </div>
+                  )}
+                  {/* Totals Box */}
+                  <div className="bg-primary/5 rounded-2xl p-4 border border-primary/20 space-y-3">
+                    <div className="flex justify-between items-center text-sm text-gray-400">
+                      <span className="font-bold text-white">{itemsTotal} <span className="text-xs">{language === 'ar' ? 'ج' : 'EG'}</span></span>
+                      <span>{language === 'ar' ? 'إجمالي الأصناف' : 'Items Total'}</span>
+                    </div>
+                    {discount > 0 && (
+                      <div className="flex justify-between items-center text-sm text-green-400">
+                        <span className="font-bold">-{discount} <span className="text-xs">{language === 'ar' ? 'ج' : 'EG'}</span></span>
+                        <span>{language === 'ar' ? 'خصم الكوبون' : 'Coupon Discount'}</span>
+                      </div>
+                    )}
+                    {(order.delivery_method === 'delivery' || deliveryFee > 0) && (
+                      <div className="flex justify-between items-center text-sm text-gray-400">
+                        <span className="font-bold text-white">
+                          {deliveryFee > 0 ? `${deliveryFee} ${language === 'ar' ? 'ج' : 'EG'}` : (language === 'ar' ? 'مجاني' : 'Free')}
+                        </span>
+                        <span>{language === 'ar' ? 'رسوم التوصيل' : 'Delivery Fee'}</span>
+                      </div>
+                    )}
+                    <div className="h-px bg-white/10 my-2"></div>
+                    <div className="flex justify-between items-center pt-2">
+                      <span className="font-black text-2xl text-primary">{order.total_amount} <span className="text-sm">{language === 'ar' ? 'ج' : 'EG'}</span></span>
+                      <span className="font-black text-lg text-white">{language === 'ar' ? 'الإجمالي' : 'Total'}</span>
+                    </div>
+                  </div>
+                  <div className="h-4"></div>
+                </div>
+              );
+            })()}
+
+
+            <div className={!fullScreenOrderId && activeTab === 'settings' ? 'space-y-6 block' : 'space-y-6 hidden'}>
                 <div className="relative mb-2">
                   {settingsView === 'main' && (
                     <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
@@ -1202,7 +1717,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                           <button
                             type="button"
                             onClick={() => setSettingsView('account')}
-                            className="flex items-center gap-3 flex-1 text-right group"
+                            className="flex items-center gap-3 flex-1 text-start group"
                           >
                             <div className="relative">
                               <div className="flex h-14 w-14 items-center justify-center rounded-full bg-primary/20 text-xl font-black text-white border-2 border-primary/30 group-hover:bg-primary/30 transition-all">
@@ -1263,7 +1778,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                       {/* Settings List */}
                       <div className="pt-2">
                         <div className="flex items-center justify-between mb-4">
-                          <h3 className="text-lg font-black text-white text-right">
+                          <h3 className="text-lg font-black text-white text-start">
                             {language === 'ar' ? 'الأعدادات' : 'Settings'}
                           </h3>
                         </div>
@@ -1272,13 +1787,13 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                           {profileCustomerId && (
                             <button
                               onClick={() => setSettingsView('security')}
-                              className="w-full flex items-center justify-between p-3 hover:bg-white/5 transition-all rounded-xl group"
+                              className="profile-menu-item w-full flex items-center justify-between p-3 hover:bg-white/5 transition-all rounded-xl group"
                             >
                               <div className="flex items-center gap-4">
                                 <div className="w-10 h-10 flex items-center justify-center rounded-lg bg-amber-500/10 text-amber-500">
                                   <Lock className="w-5 h-5" />
                                 </div>
-                                <div className="text-right">
+                                <div className="text-start">
                                   <p className="text-white font-black text-sm">{language === 'ar' ? 'أمان الحساب' : 'Account Security'}</p>
                                   <p className="text-[10px] text-muted">{language === 'ar' ? 'كلمة المرور، كود الاسترجاع' : 'Password, recovery code'}</p>
                                 </div>
@@ -1289,13 +1804,13 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
 
                           <button
                             onClick={() => setLanguage(language === 'ar' ? 'en' : 'ar')}
-                            className="w-full flex items-center justify-between p-3 hover:bg-white/5 transition-all rounded-xl group"
+                            className="profile-menu-item w-full flex items-center justify-between p-3 hover:bg-white/5 transition-all rounded-xl group"
                           >
                             <div className="flex items-center gap-4">
                               <div className="w-10 h-10 flex items-center justify-center rounded-lg bg-blue-500/10 text-blue-500">
                                 <Globe className="w-5 h-5" />
                               </div>
-                              <div className="text-right">
+                              <div className="text-start">
                                 <p className="text-white font-black text-sm">{language === 'ar' ? 'اللغة' : 'Language'}</p>
                                 <p className="text-[10px] text-muted">{language === 'ar' ? 'العربية' : 'English'}</p>
                               </div>
@@ -1305,13 +1820,13 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
 
                           <button
                             onClick={toggleTheme}
-                            className="w-full flex items-center justify-between p-3 hover:bg-white/5 transition-all rounded-xl group"
+                            className="profile-menu-item w-full flex items-center justify-between p-3 hover:bg-white/5 transition-all rounded-xl group"
                           >
                             <div className="flex items-center gap-4">
                               <div className="w-10 h-10 flex items-center justify-center rounded-lg bg-primary/10 text-primary">
                                 {theme === 'dark' ? <Moon className="w-5 h-5" /> : <Sun className="w-5 h-5" />}
                               </div>
-                              <div className="text-right">
+                              <div className="text-start">
                                 <p className="text-white font-black text-sm">{language === 'ar' ? 'الوضع' : 'Theme'}</p>
                                 <p className="text-[10px] text-muted">{theme === 'dark' ? (language === 'ar' ? 'مظلم' : 'Dark') : (language === 'ar' ? 'فاتح' : 'Light')}</p>
                               </div>
@@ -1321,7 +1836,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
 
                           <button
                             onClick={() => setSettingsView('coupons')}
-                            className="w-full flex items-center justify-between p-3 hover:bg-white/5 transition-all rounded-xl group"
+                            className="profile-menu-item w-full flex items-center justify-between p-3 hover:bg-white/5 transition-all rounded-xl group"
                           >
                             <div className="flex items-center gap-4">
                               <div className="w-10 h-10 flex items-center justify-center rounded-lg bg-green-500/10 text-green-500 relative">
@@ -1332,7 +1847,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                   </span>
                                 )}
                               </div>
-                              <div className="text-right">
+                              <div className="text-start">
                                 <p className="text-white font-black text-sm">{language === 'ar' ? 'الكوبونات' : 'Coupons'}</p>
                                 <p className="text-[10px] text-muted">{language === 'ar' ? 'عرض الكوبونات المتاحة' : 'View available coupons'}</p>
                               </div>
@@ -1352,11 +1867,10 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                       <button
                         type="button"
                         onClick={() => { setSettingsView('main'); setAccountMenuOpen(null); }}
-                        className="inline-flex items-center gap-1 rounded-lg border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-black text-white"
-                      >
-                        <ChevronRight className="h-3.5 w-3.5" />
-                        {language === 'ar' ? 'رجوع' : 'Back'}
-                      </button>
+                        className="h-9 w-9 flex items-center justify-center rounded-full bg-white/10 text-white shadow-sm backdrop-blur-sm transition-colors hover:bg-white/20 focus:outline-none shrink-0"
+                  >
+                    {language === 'ar' ? <ChevronRight className="h-5 w-5" /> : <ChevronLeft className="h-5 w-5" />}
+                  </button>
 
                       <div className="space-y-3 mt-4">
                         {savedAccounts.map((acc) => {
@@ -1382,7 +1896,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                     setIsSwitchingAccount(null);
                                   }
                                 }}
-                                className={`w-full rounded-2xl border ${language === 'ar' ? 'p-4 pl-12 text-right' : 'p-4 pr-12 text-left'} transition-all ${isActive
+                                className={`w-full rounded-2xl border ${language === 'ar' ? 'p-4 pl-12 text-start' : 'p-4 pr-12 text-left'} transition-all ${isActive
                                   ? 'border-primary bg-primary/20 ring-1 ring-primary/30'
                                   : 'border-primary/40 bg-primary/10 hover:bg-primary/15'
                                   }`}
@@ -1394,7 +1908,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                       <div className="h-5 w-5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
                                     ) : initial}
                                   </div>
-                                  <div className={`flex-1 min-w-0 ${language === 'en' ? 'text-left' : 'text-right'}`}>
+                                  <div className={`flex-1 min-w-0 ${language === 'en' ? 'text-left' : 'text-start'}`}>
                                     <div className={`flex items-center gap-2 ${language === 'en' ? 'justify-end flex-row-reverse' : 'justify-start'}`}>
                                       <p className="text-white text-base font-black truncate">{acc.name || (language === 'ar' ? 'بدون اسم' : 'No Name')}</p>
                                       {isActive && (
@@ -1439,7 +1953,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                           // Refresh list but stay in switch_accounts
                                           await fetchSavedAccounts();
                                         }}
-                                        className="w-full flex items-center gap-2.5 px-4 py-3 text-right text-xs font-bold text-white hover:bg-white/5 transition-colors border-b border-white/5"
+                                        className="w-full flex items-center gap-2.5 px-4 py-3 text-start text-xs font-bold text-white hover:bg-white/5 transition-colors border-b border-white/5"
                                       >
                                         <XCircle className="w-4 h-4 text-muted shrink-0" />
                                         <span>{language === 'ar' ? 'إلغاء الاختيار' : 'Deselect'}</span>
@@ -1453,7 +1967,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                         setAccountMenuOpen(null);
                                         setLogoutConfirm({ name: acc.name, phone: acc.phone });
                                       }}
-                                      className="w-full flex items-center gap-2.5 px-4 py-3 text-right text-xs font-bold text-red-400 hover:bg-red-500/5 transition-colors"
+                                      className="w-full flex items-center gap-2.5 px-4 py-3 text-start text-xs font-bold text-red-400 hover:bg-red-500/5 transition-colors"
                                     >
                                       <LogOut className="w-4 h-4 shrink-0" />
                                       <span>{language === 'ar' ? 'تسجيل الخروج' : 'Logout'}</span>
@@ -1509,11 +2023,10 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                         <button
                           type="button"
                           onClick={() => { setSettingsView(accountEditBackTarget); setViewingAccountPhone(null); setAccountEditBackTarget('main'); }}
-                          className="inline-flex w-auto self-start items-center gap-1 rounded-lg border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-black text-white"
-                        >
-                          <ChevronRight className="h-3.5 w-3.5" />
-                          {language === 'ar' ? 'رجوع' : 'Back'}
-                        </button>
+                          className="h-9 w-9 flex items-center justify-center rounded-full bg-white/10 text-white shadow-sm backdrop-blur-sm transition-colors hover:bg-white/20 focus:outline-none shrink-0"
+                  >
+                    {language === 'ar' ? <ChevronRight className="h-5 w-5" /> : <ChevronLeft className="h-5 w-5" />}
+                  </button>
                         <button
                           type="button"
                           onClick={() => {
@@ -1521,7 +2034,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                             profileDraftSnapshotRef.current = { ...profileDraft };
                             setSettingsView('data');
                           }}
-                          className="w-full rounded-xl border border-primary/35 bg-dark/70 p-4 text-right hover:bg-white/5 transition-colors"
+                          className="w-full rounded-xl border border-primary/35 bg-dark/70 p-4 text-start hover:bg-white/5 transition-colors"
                         >
                           <div className="mb-2 flex items-center justify-between">
                             <h4 className="text-sm font-black text-white">{language === 'ar' ? 'معلومات الطلب' : 'Order Information'}</h4>
@@ -1550,7 +2063,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                             addressTabIdSnapshotRef.current = activeProfileAddressTabId;
                             setSettingsView('addresses');
                           }}
-                          className="w-full rounded-xl border border-primary/35 bg-dark/70 p-4 text-right"
+                          className="w-full rounded-xl border border-primary/35 bg-dark/70 p-4 text-start"
                         >
                           <div className="mb-2 flex items-center justify-between">
                             <h4 className="text-sm font-black text-white">{language === 'ar' ? 'العناوين' : 'Addresses'}</h4>
@@ -1606,23 +2119,22 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                           }
                           setSettingsView('account');
                         }}
-                        className="inline-flex w-auto self-start items-center gap-1 rounded-lg border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-black text-white"
-                      >
-                        <ChevronRight className="h-3.5 w-3.5" />
-                        {language === 'ar' ? 'رجوع' : 'Back'}
-                      </button>
-                      <h4 className="text-sm font-black text-white text-right">{language === 'ar' ? 'معلومات الطلب' : 'Order Information'}</h4>
+                        className="h-9 w-9 flex items-center justify-center rounded-full bg-white/10 text-white shadow-sm backdrop-blur-sm transition-colors hover:bg-white/20 focus:outline-none shrink-0"
+                  >
+                    {language === 'ar' ? <ChevronRight className="h-5 w-5" /> : <ChevronLeft className="h-5 w-5" />}
+                  </button>
+                      <h4 className="text-sm font-black text-white text-start">{language === 'ar' ? 'معلومات الطلب' : 'Order Information'}</h4>
                       <div>
-                        <label className="mb-1 block text-right text-xs text-muted">{language === 'ar' ? 'الاسم' : 'Name'}</label>
+                        <label className="mb-1 block text-start text-xs text-muted">{language === 'ar' ? 'الاسم' : 'Name'}</label>
                         <input
                           value={profileDraft.name}
                           onChange={(e) => setProfileDraft((p) => ({ ...p, name: e.target.value }))}
                           placeholder={language === 'ar' ? 'الاسم' : 'Name'}
-                          className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-right text-sm text-white"
+                          className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-start text-sm text-white"
                         />
                       </div>
                       <div>
-                        <label className="mb-1 block text-right text-xs text-muted">{language === 'ar' ? 'رقم الهاتف' : 'Phone Number'}</label>
+                        <label className="mb-1 block text-start text-xs text-muted">{language === 'ar' ? 'رقم الهاتف' : 'Phone Number'}</label>
                         <input
                           value={profileDraft.phone}
                           maxLength={15}
@@ -1632,7 +2144,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                             if (profilePhoneError) setProfilePhoneError(null);
                           }}
                           placeholder={language === 'ar' ? 'رقم الهاتف' : 'Phone'}
-                          className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-right text-sm text-white"
+                          className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-start text-sm text-white"
                           dir="ltr"
                         />
                       </div>
@@ -1647,7 +2159,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                               if (profilePhoneError) setProfilePhoneError(null);
                             }}
                             placeholder={language === 'ar' ? 'رقم إضافي (اختياري)' : 'Secondary phone (optional)'}
-                            className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-right text-sm text-white"
+                            className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-start text-sm text-white"
                             dir="ltr"
                           />
                           <button
@@ -1671,7 +2183,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                         </button>
                       )}
                       {profilePhoneError && (
-                        <p className="text-red-400 text-right text-sm font-bold">{profilePhoneError}</p>
+                        <p className="text-red-400 text-start text-sm font-bold">{profilePhoneError}</p>
                       )}
                       <button
                         type="button"
@@ -1685,7 +2197,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                   )}
 
                   {settingsView === 'addresses' && (
-                    <div className={`space-y-3 text-right ${phoneChrome ? 'profile-mobile-push' : ''}`}>
+                    <div className={`space-y-3 text-start ${phoneChrome ? 'profile-mobile-push' : ''}`}>
                       <button
                         type="button"
                         onClick={() => {
@@ -1706,11 +2218,10 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                           }
                           setSettingsView('account');
                         }}
-                        className="inline-flex w-auto self-start items-center gap-1 rounded-lg border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-black text-white"
-                      >
-                        <ChevronRight className="h-3.5 w-3.5" />
-                        {language === 'ar' ? 'رجوع' : 'Back'}
-                      </button>
+                        className="h-9 w-9 flex items-center justify-center rounded-full bg-white/10 text-white shadow-sm backdrop-blur-sm transition-colors hover:bg-white/20 focus:outline-none shrink-0"
+                  >
+                    {language === 'ar' ? <ChevronRight className="h-5 w-5" /> : <ChevronLeft className="h-5 w-5" />}
+                  </button>
                       <h4 className="text-sm font-black text-white">{language === 'ar' ? 'العناوين' : 'Addresses'}</h4>
 
                       {typeof mapLat === 'number' && typeof mapLng === 'number' && (
@@ -1753,7 +2264,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                           >
                             <Clock className="w-4 h-4" />
                           </button>
-                          <div className="text-right flex-1">
+                          <div className="text-start flex-1">
                             <p className="text-[10px] text-muted font-bold">
                               {language === 'ar' ? 'موعد الاستلام التلقائي:' : 'Default Pickup Time:'}
                             </p>
@@ -1870,20 +2381,20 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                             value={profileDraft.building_number}
                             onChange={(e) => setProfileDraft((p) => ({ ...p, building_number: e.target.value }))}
                             placeholder={language === 'ar' ? 'اسم/رقم المبنى' : 'Building Name/No.'}
-                            className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-right text-sm text-white"
+                            className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-start text-sm text-white"
                           />
                           <div className="grid grid-cols-2 gap-2">
                             <input
                               value={profileDraft.floor}
                               onChange={(e) => setProfileDraft((p) => ({ ...p, floor: e.target.value }))}
                               placeholder={language === 'ar' ? 'الطابق' : 'Floor'}
-                              className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-right text-sm text-white"
+                              className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-start text-sm text-white"
                             />
                             <input
                               value={profileDraft.apartment}
                               onChange={(e) => setProfileDraft((p) => ({ ...p, apartment: e.target.value }))}
                               placeholder={language === 'ar' ? 'الشقة' : 'Apartment'}
-                              className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-right text-sm text-white"
+                              className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-start text-sm text-white"
                             />
                           </div>
                         </>
@@ -1893,7 +2404,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                           value={profileDraft.house_name}
                           onChange={(e) => setProfileDraft((p) => ({ ...p, house_name: e.target.value }))}
                           placeholder={language === 'ar' ? 'اسم/رقم المنزل' : 'House Name/No.'}
-                          className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-right text-sm text-white"
+                          className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-start text-sm text-white"
                         />
                       )}
                       {profileAddressType === 'workplace' && (
@@ -1902,19 +2413,19 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                             value={profileDraft.building_number}
                             onChange={(e) => setProfileDraft((p) => ({ ...p, building_number: e.target.value }))}
                             placeholder={language === 'ar' ? 'اسم المبنى' : 'Building Name'}
-                            className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-right text-sm text-white"
+                            className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-start text-sm text-white"
                           />
                           <input
                             value={profileDraft.company_name}
                             onChange={(e) => setProfileDraft((p) => ({ ...p, company_name: e.target.value }))}
                             placeholder={language === 'ar' ? 'اسم الشركة' : 'Company Name'}
-                            className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-right text-sm text-white"
+                            className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-start text-sm text-white"
                           />
                           <input
                             value={profileDraft.floor}
                             onChange={(e) => setProfileDraft((p) => ({ ...p, floor: e.target.value }))}
                             placeholder={language === 'ar' ? 'الطابق' : 'Floor'}
-                            className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-right text-sm text-white"
+                            className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-start text-sm text-white"
                           />
                         </>
                       )}
@@ -1922,19 +2433,19 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                         value={profileDraft.street}
                         onChange={(e) => setProfileDraft((p) => ({ ...p, street: e.target.value }))}
                         placeholder={language === 'ar' ? 'الشارع' : 'Street'}
-                        className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-right text-sm text-white"
+                        className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-start text-sm text-white"
                       />
                       <input
                         value={profileDraft.city}
                         onChange={(e) => setProfileDraft((p) => ({ ...p, city: e.target.value }))}
                         placeholder={language === 'ar' ? 'المدينة' : 'City'}
-                        className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-right text-sm text-white"
+                        className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-start text-sm text-white"
                       />
                       <input
                         value={profileDraft.landmark}
                         onChange={(e) => setProfileDraft((p) => ({ ...p, landmark: e.target.value }))}
                         placeholder={language === 'ar' ? 'علامة مميزة' : 'Landmark'}
-                        className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-right text-sm text-white"
+                        className="w-full rounded-lg border border-primary/35 bg-dark px-3 py-2 text-start text-sm text-white"
                       />
                       <button
                         type="button"
@@ -1956,11 +2467,10 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                     <button
                       type="button"
                       onClick={() => setSettingsView('main')}
-                      className="inline-flex w-auto self-start items-center gap-1 rounded-lg border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-black text-white"
-                    >
-                      <ChevronRight className="h-3.5 w-3.5" />
-                      {language === 'ar' ? 'رجوع' : 'Back'}
-                    </button>
+                      className="h-9 w-9 flex items-center justify-center rounded-full bg-white/10 text-white shadow-sm backdrop-blur-sm transition-colors hover:bg-white/20 focus:outline-none shrink-0"
+                  >
+                    {language === 'ar' ? <ChevronRight className="h-5 w-5" /> : <ChevronLeft className="h-5 w-5" />}
+                  </button>
 
                     <div className="bg-dark/50 rounded-2xl p-6 border border-amber-500/25">
                       <div className="flex items-center justify-between mb-4">
@@ -1975,13 +2485,13 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                         )}
                       </div>
 
-                      <p className="text-sm text-gray-400 text-right leading-relaxed mb-6">
+                      <p className="text-sm text-gray-400 text-start leading-relaxed mb-6">
                         {language === 'ar'
                           ? 'يمكنك إضافة كلمة مرور مرتبطة برقمك (اختياري). عند تسجيل الدخول من جهاز آخر سيُطلب إدخالها. إذا نسيتها استخدم كود الاسترجاع.'
                           : 'You can set an optional password for your phone. Other devices will be asked for it. If you forget it, use the recovery code.'}
                       </p>
 
-                      {secErr && <p className="text-red-400 text-xs font-black text-right mb-4">{secErr}</p>}
+                      {secErr && <p className="text-red-400 text-xs font-black text-start mb-4">{secErr}</p>}
 
                       {!hasPhonePassword ? (
                         <div className="space-y-4">
@@ -1994,7 +2504,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                 setSecErr(null);
                                 setSecNewRecoveryShown(null);
                               }}
-                              className="w-full bg-gray-900 border border-amber-500/35 rounded-xl px-4 py-3 text-white text-right text-sm"
+                              className="w-full bg-gray-900 border border-amber-500/35 rounded-xl px-4 py-3 text-white text-start text-sm"
                               placeholder={language === 'ar' ? 'كلمة المرور (اختياري)' : 'Password (optional)'}
                               dir="ltr"
                             />
@@ -2006,7 +2516,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                 setSecErr(null);
                                 setSecNewRecoveryShown(null);
                               }}
-                              className="w-full bg-gray-900 border border-amber-500/35 rounded-xl px-4 py-3 text-white text-right text-sm"
+                              className="w-full bg-gray-900 border border-amber-500/35 rounded-xl px-4 py-3 text-white text-start text-sm"
                               placeholder={language === 'ar' ? 'تأكيد كلمة المرور' : 'Confirm password'}
                               dir="ltr"
                             />
@@ -2060,7 +2570,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                         </div>
                       ) : (
                         <div className="space-y-4">
-                          <p className="text-sm text-amber-200/90 text-right font-bold">
+                          <p className="text-sm text-amber-200/90 text-start font-bold">
                             {language === 'ar' ? 'كلمة المرور مفعّلة على هذا الرقم.' : 'Password is enabled for this phone.'}
                           </p>
                           <button
@@ -2076,7 +2586,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
 
                           {securityDetailsOpen && (
                             <div className="rounded-xl border border-amber-500/20 bg-black/15 p-4 space-y-4">
-                              <p className="text-xs text-gray-300 text-right leading-relaxed">
+                              <p className="text-xs text-gray-300 text-start leading-relaxed">
                                 {language === 'ar'
                                   ? 'لتغيير كلمة المرور في أي وقت: أدخل كود الاسترجاع ثم ضع كلمة مرور جديدة. سيتم إنشاء كود استرجاع جديد تلقائياً.'
                                   : 'To change password anytime: enter recovery code, set a new password. A new recovery code will be generated.'}
@@ -2089,7 +2599,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                   setSecErr(null);
                                   setSecNewRecoveryShown(null);
                                 }}
-                                className="w-full bg-gray-900 border border-amber-500/30 rounded-xl px-4 py-3 text-white text-right text-sm font-black"
+                                className="w-full bg-gray-900 border border-amber-500/30 rounded-xl px-4 py-3 text-white text-start text-sm font-black"
                                 placeholder={language === 'ar' ? 'كود الاسترجاع (6 أرقام)' : 'Recovery code (6 digits)'}
                                 dir="ltr"
                               />
@@ -2102,7 +2612,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                     setSecErr(null);
                                     setSecNewRecoveryShown(null);
                                   }}
-                                  className="w-full bg-gray-900 border border-amber-500/30 rounded-xl px-4 py-3 text-white text-right text-sm"
+                                  className="w-full bg-gray-900 border border-amber-500/30 rounded-xl px-4 py-3 text-white text-start text-sm"
                                   placeholder={language === 'ar' ? 'كلمة مرور جديدة' : 'New password'}
                                   dir="ltr"
                                 />
@@ -2114,7 +2624,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                     setSecErr(null);
                                     setSecNewRecoveryShown(null);
                                   }}
-                                  className="w-full bg-gray-900 border border-amber-500/30 rounded-xl px-4 py-3 text-white text-right text-sm"
+                                  className="w-full bg-gray-900 border border-amber-500/30 rounded-xl px-4 py-3 text-white text-start text-sm"
                                   placeholder={language === 'ar' ? 'تأكيد كلمة المرور' : 'Confirm password'}
                                   dir="ltr"
                                 />
@@ -2215,8 +2725,6 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                     </div>
                   </div>
                 )}
-              </div>
-            )}
 
             {settingsView === 'coupons' && (
               <div className={`space-y-4 ${phoneChrome ? 'profile-mobile-push' : ''}`}>
@@ -2224,10 +2732,9 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                   <button
                     type="button"
                     onClick={() => setSettingsView('main')}
-                    className="inline-flex w-auto items-center gap-1 rounded-lg border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-black text-white"
+                    className="h-9 w-9 flex items-center justify-center rounded-full bg-white/10 text-white shadow-sm backdrop-blur-sm transition-colors hover:bg-white/20 focus:outline-none shrink-0"
                   >
-                    <ChevronRight className="h-3.5 w-3.5" />
-                    {language === 'ar' ? 'رجوع' : 'Back'}
+                    {language === 'ar' ? <ChevronRight className="h-5 w-5" /> : <ChevronLeft className="h-5 w-5" />}
                   </button>
                   <h3 className="text-lg font-black text-white flex items-center gap-2">
                     {language === 'ar' ? 'كوبونات الخصم' : 'Your Coupons'}
@@ -2262,13 +2769,13 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                           className="bg-surface/60 rounded-2xl p-5 border border-primary/20 relative overflow-hidden group hover:border-primary/50 transition-all shadow-lg"
                         >
                           <div className="flex items-start justify-between relative z-10">
-                            <div className="text-right flex-1">
+                            <div className="text-start flex-1">
                               <div className="flex items-center justify-end gap-2 mb-3">
                                 <span className="bg-primary/20 text-primary border border-primary/30 px-3 py-1 rounded-full text-[10px] font-black">
                                   {language === 'ar' ? `خصم ${coupon.discount_percent}%` : `${coupon.discount_percent}% OFF`}
                                 </span>
                               </div>
-                              <p className="text-[11px] text-green-300 font-black text-right mb-2">
+                              <p className="text-[11px] text-green-300 font-black text-start mb-2">
                                 {language === 'ar'
                                   ? `وفّرت: ${totalSaved} ج`
                                   : `Saved: ${totalSaved} EG`}
@@ -2357,7 +2864,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
             )}
             {couponDetailsCode && (
               <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/80" onClick={() => setCouponDetailsCode(null)}>
-                <div className="bg-surface w-full max-w-sm rounded-2xl border border-primary/30 p-4 text-right" onClick={(e) => e.stopPropagation()}>
+                <div className="bg-surface w-full max-w-sm rounded-2xl border border-primary/30 p-4 text-start" onClick={(e) => e.stopPropagation()}>
                   <div className="flex items-center justify-between mb-3">
                     <button className="text-gray-400" onClick={() => setCouponDetailsCode(null)}>
                       <X className="w-5 h-5" />
@@ -2379,7 +2886,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                             setActiveHighlightId(o.id);
                             window.setTimeout(() => setActiveHighlightId(null), 2200);
                           }}
-                          className="w-full rounded-lg border border-primary/30 bg-dark/70 p-2 text-right hover:border-primary/60"
+                          className="w-full rounded-lg border border-primary/30 bg-dark/70 p-2 text-start hover:border-primary/60"
                         >
                           <p className="text-white font-black text-sm">#{(o as any).order_number}</p>
                           <p className="text-xs text-muted">{new Date(o.created_at).toLocaleString(language === 'ar' ? 'ar-EG' : 'en-US')}</p>
@@ -2389,12 +2896,13 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                 </div>
               </div>
             )}
+          </div>
 
             {/* Orders Tab */}
-            {activeTab === 'orders' && (
+            <div className={!fullScreenOrderId && activeTab === 'orders' ? 'block' : 'hidden'}>
               <>
                 <div className="mb-6">
-                  <h3 className="text-xl font-bold text-white text-right mb-4">
+                  <h3 className="text-xl font-bold text-white text-start mb-4">
                     {language === 'ar' ? 'طلباتي' : 'My Orders'}
                   </h3>
                 </div>
@@ -2418,7 +2926,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                         <>
                           {/* Active Orders Horizontal Swipe Carousel */}
                           <div className="space-y-3">
-                            <h4 className="text-white font-bold text-right flex items-center justify-end gap-2 text-lg">
+                            <h4 className="text-white font-bold text-start flex items-center justify-end gap-2 text-lg">
                               <span>{language === 'ar' ? 'طلبات قيد التنفيذ' : 'Pending Orders'}</span>
                               <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse shadow-[0_0_8px_rgba(250,204,21,0.8)]"></div>
                             </h4>
@@ -2435,145 +2943,22 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                 {activeOrders.map(order => {
                                   const statusInfo = getStatusInfo(order.status, order.delivery_method);
                                   const StatusIcon = statusInfo.icon;
-                                  const isExpanded = expandedOrderId === order.id;
-                                  const isEditingNote = editingNoteOrderId === order.id;
-                                  const isCancelling = cancelOrderId === order.id;
-                                  const isDetailsOpen = isExpanded || isCancelling;
 
-                                  const itemsTotal = order.items.reduce((sum, item) => sum + item.subtotal, 0);
-                                  const discount = order.applied_coupon_discount_percent
-                                    ? Math.round((itemsTotal * order.applied_coupon_discount_percent) / 100)
-                                    : 0;
-                                  const deliveryFee = order.total_amount - (itemsTotal - discount);
 
                                   return (
                                     <div
                                       key={order.id}
                                       id={`order-${order.id}`}
-                                      className={`snap-center shrink-0 w-[85%] sm:w-[320px] bg-dark/70 border-2 rounded-2xl p-5 shadow-xl transition-all duration-500 flex flex-col hover:border-primary/50 ${order.id === activeHighlightId ? 'order-highlight-glow border-primary' : 'border-primary/20'}`}
+                                      className={`snap-center shrink-0 w-[85%] sm:w-[320px] bg-dark/70 border-2 rounded-2xl shadow-xl transition-all duration-500 flex flex-col hover:border-primary/50 overflow-hidden relative ${order.id === activeHighlightId ? 'order-highlight-glow border-primary' : 'border-primary/20'}`}
                                     >
-                                      <div className="flex items-start justify-between mb-3 relative">
-                                        <div className="text-right flex-1 cursor-pointer" onClick={() => setExpandedOrderId(isExpanded ? null : order.id)}>
-                                          <p className="text-muted text-[10px] mb-0.5">{language === 'ar' ? 'رقم الطلب' : 'Order ID'}</p>
-                                          <p className="text-white font-black text-2xl">#{order.order_number}</p>
-                                        </div>
-
-                                        <div className="flex flex-col items-end gap-2">
-                                          <div className="relative">
-                                            <button
-                                              onClick={(e) => {
-                                                e.stopPropagation();
-                                                setShowActionMenu(showActionMenu === order.id ? null : order.id);
-                                              }}
-                                              className="p-2 hover:bg-white/10 rounded-full transition-colors text-gray-400 hover:text-white"
-                                            >
-                                              <MoreVertical className="w-5 h-5" />
-                                            </button>
-
-                                            {showActionMenu === order.id && (
-                                              <>
-                                                <div
-                                                  className="fixed inset-0 z-[80]"
-                                                  onClick={() => setShowActionMenu(null)}
-                                                ></div>
-                                                <div className="absolute top-10 left-0 z-[81] bg-surface border border-primary/30 rounded-xl shadow-2xl py-2 min-w-[150px] animate-in fade-in zoom-in duration-200">
-                                                  {(() => {
-                                                    const isPickup = order.delivery_method === 'pickup';
-                                                    const isUnderReview = order.status === 'under_review';
-
-                                                    // Allow if it's a pickup order, OR if it's under_review (so they can change it to pickup)
-                                                    if (!isPickup && !isUnderReview) return null;
-
-                                                    const deadline = order.pickup_deadline_at ? new Date(order.pickup_deadline_at).getTime() : 0;
-                                                    const hasDeadline = deadline > 0;
-
-                                                    let showPickupAction = false;
-                                                    let pickupActionType: 'add' | 'edit' = 'add';
-
-                                                    if (isUnderReview) {
-                                                      showPickupAction = true;
-                                                      pickupActionType = (isPickup && hasDeadline) ? 'edit' : 'add';
-                                                    } else if (isPickup && hasDeadline) {
-                                                      const now = Date.now();
-                                                      const diffHours = (deadline - now) / (1000 * 60 * 60);
-                                                      const updatedAt = order.pickup_deadline_updated_at ? new Date(order.pickup_deadline_updated_at).getTime() : new Date(order.created_at).getTime();
-                                                      const minsSinceUpdate = (now - updatedAt) / (1000 * 60);
-                                                      if (diffHours > 1 || minsSinceUpdate <= 30) {
-                                                        showPickupAction = true;
-                                                        pickupActionType = 'edit';
-                                                      }
-                                                    }
-
-                                                    if (!showPickupAction) return null;
-
-                                                    return (
-                                                      <button
-                                                        onClick={() => {
-                                                          setShowUpdateTimePicker(order.id);
-                                                          setShowActionMenu(null);
-                                                        }}
-                                                        className="w-full text-right px-4 py-2 hover:bg-primary/10 text-white text-sm font-bold flex items-center justify-between"
-                                                      >
-                                                        <Clock className="w-4 h-4" />
-                                                        <span>
-                                                          {pickupActionType === 'add'
-                                                            ? (language === 'ar' ? 'اضافة موعد للاستلام من الفرع' : 'Add Pickup Time')
-                                                            : (language === 'ar' ? 'تعديل موعد الاستلام' : 'Change Pickup Time')}
-                                                        </span>
-                                                      </button>
-                                                    );
-                                                  })()}
-                                                  {(order.status === 'under_review' || order.status === 'preparing') && (
-                                                    <button
-                                                      onClick={() => {
-                                                        onStartOrderEdit?.(order);
-                                                        setShowActionMenu(null);
-                                                      }}
-                                                      className="w-full text-right px-4 py-2 hover:bg-primary/10 text-white text-sm font-bold flex items-center justify-between"
-                                                    >
-                                                      <Edit2 className="w-4 h-4" />
-                                                      <span>{language === 'ar' ? 'تعديل الطلب' : 'Edit Order'}</span>
-                                                    </button>
-                                                  )}
-                                                  {order.status === 'under_review' && (
-                                                    <button
-                                                      onClick={() => {
-                                                        setCancelOrderId(order.id);
-                                                        setCancelReason('');
-                                                        setExpandedOrderId(order.id); // ensure expanded
-                                                        setShowActionMenu(null);
-                                                      }}
-                                                      className="w-full text-right px-4 py-2 hover:bg-red-500/10 text-red-500 text-sm font-bold flex items-center justify-between"
-                                                    >
-                                                      <XCircle className="w-4 h-4" />
-                                                      <span>{language === 'ar' ? 'إلغاء الطلب' : 'Cancel Order'}</span>
-                                                    </button>
-                                                  )}
-                                                  <button
-                                                    onClick={() => {
-                                                      setEditingNoteOrderId(order.id);
-                                                      setEditedNote(order.order_note || '');
-                                                      setExpandedOrderId(order.id);
-                                                      setShowActionMenu(null);
-                                                    }}
-                                                    className="w-full text-right px-4 py-2 hover:bg-primary/10 text-white text-sm font-bold flex items-center justify-between"
-                                                  >
-                                                    <MessageSquare className="w-4 h-4" />
-                                                    <span>
-                                                      {order.order_note?.trim()
-                                                        ? (language === 'ar' ? 'تعديل الملاحظة' : 'Edit Note')
-                                                        : (language === 'ar' ? 'أضف ملاحظة' : 'Add Note')}
-                                                    </span>
-                                                  </button>
-                                                </div>
-                                              </>
-                                            )}
+                                      <div className="p-4 flex-1 flex flex-col">
+                                        {/* Order number + pickup timer */}
+                                        <div className="flex items-start justify-between mb-2 relative">
+                                          <div className="text-start flex-1 cursor-pointer" onClick={() => setFullScreenOrderId(order.id)}>
+                                            <p className="text-muted text-[10px] mb-0.5">{language === 'ar' ? 'رقم الطلب' : 'Order ID'}</p>
+                                            <p className="text-white font-black text-2xl">#{order.order_number}</p>
                                           </div>
 
-                                          <div className={`flex items-center gap-2 px-3 py-1 rounded-full border ${statusInfo.bg} ${statusInfo.border} ${statusInfo.color}`}>
-                                            <span className="font-bold text-[11px] whitespace-nowrap">{statusInfo.text}</span>
-                                            <StatusIcon className="w-4 h-4" />
-                                          </div>
                                           {(() => {
                                             const pickupTimer = getPickupTimerMeta(order);
                                             if (!pickupTimer) return null;
@@ -2588,8 +2973,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                                 </div>
                                                 <div className="h-3 flex items-center justify-end">
                                                   {formattedDeadline && (
-                                                    <span className="text-[10px] text-muted font-bold text-right leading-none flex items-center gap-1">
-                                                      {/* Updated label removed as per user request */}
+                                                    <span className="text-[10px] text-muted font-bold leading-none">
                                                       {formattedDeadline}
                                                     </span>
                                                   )}
@@ -2598,181 +2982,47 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                             );
                                           })()}
                                         </div>
-                                      </div>
 
-                                      <div
-                                        className="flex-1"
-                                      >
+                                        {/* Status badge */}
+                                        <div className="flex items-center justify-end mb-2 cursor-pointer" onClick={() => setFullScreenOrderId(order.id)}>
+                                          <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[10px] font-black ${statusInfo.bg} ${statusInfo.border} ${statusInfo.color}`}>
+                                            <StatusIcon className="w-3 h-3" />
+                                            <span>{statusInfo.text}</span>
+                                          </div>
+                                        </div>
+
+                                        {/* Time + item count + total row */}
                                         <div
-                                          className="flex items-baseline justify-between text-xs text-gray-400 mb-4 border-b border-primary/10 pb-3 cursor-pointer"
-                                          onClick={() => setExpandedOrderId(isExpanded ? null : order.id)}
+                                          className="flex items-center justify-between text-xs text-gray-400 border-b border-primary/10 pb-3 cursor-pointer"
+                                          onClick={() => setFullScreenOrderId(order.id)}
                                         >
-                                          <div className="flex items-center gap-1">
-                                            <Clock className="w-3 h-3" />
-                                            <span>
+                                          <div className="flex items-center gap-1.5">
+                                            <Clock className="w-3 h-3 text-primary shrink-0" />
+                                            <span dir="ltr" className="font-bold">
                                               {new Date(order.created_at).toLocaleTimeString(language === 'ar' ? 'ar-EG' : 'en-US', {
                                                 hour: '2-digit',
                                                 minute: '2-digit'
                                               })}
                                             </span>
                                           </div>
-                                          <span className="text-primary font-black text-lg">
-                                            {order.total_amount} <span className="text-[10px] font-bold">{language === 'ar' ? 'ج' : 'EG'}</span>
-                                          </span>
-                                        </div>
-
-                                        <div className="text-center mb-2">
-                                          <button
-                                            onClick={() => setExpandedOrderId(isExpanded ? null : order.id)}
-                                            className="w-full text-primary text-xs font-bold py-2 rounded-xl bg-primary/5 border border-primary/20 hover:bg-primary/10 transition-all"
-                                          >
-                                            {(isExpanded || isCancelling)
-                                              ? (language === 'ar' ? 'إخفاء التفاصيل' : 'Hide Details')
-                                              : (language === 'ar' ? 'عرض التفاصيل' : 'Show Details')}
-                                          </button>
-                                        </div>
-
-                                        {/* Expanded Content */}
-                                        <div className={`overflow-hidden transition-all duration-500 ease-in-out ${isDetailsOpen ? 'max-h-[1000px] opacity-100 mt-4' : 'max-h-0 opacity-0 mt-0 pointer-events-none'}`}>
-                                          <div className="space-y-4">
-                                            {/* Cancellation Reason UI */}
-                                            {isCancelling && (
-                                              <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-3 space-y-3 animate-in fade-in slide-in-from-top-2">
-                                                <p className="text-red-400 text-xs font-bold text-right">{language === 'ar' ? 'سبب الإلغاء:' : 'Cancellation Reason:'}</p>
-                                                <textarea
-                                                  value={cancelReason}
-                                                  onChange={(e) => setCancelReason(e.target.value)}
-                                                  className="w-full bg-dark border border-red-500/50 rounded-lg p-2 text-white text-right text-xs resize-none"
-                                                  rows={2}
-                                                  dir="rtl"
-                                                  placeholder={language === 'ar' ? 'اكتب سبب الإلغاء...' : 'Write reason...'}
-                                                  autoFocus
-                                                />
-                                                <div className="flex gap-2">
-                                                  <button
-                                                    onClick={() => handleCancelOrder(order.id)}
-                                                    className="flex-1 bg-red-600 hover:bg-red-500 text-white text-xs py-2 rounded-lg font-bold transition-colors"
-                                                  >
-                                                    {language === 'ar' ? 'تأكيد الإلغاء' : 'Confirm Cancel'}
-                                                  </button>
-                                                  <button
-                                                    onClick={() => setCancelOrderId(null)}
-                                                    className="px-3 bg-gray-600 hover:bg-gray-500 text-white text-xs py-2 rounded-lg transition-colors"
-                                                  >
-                                                    {language === 'ar' ? 'تراجع' : 'Back'}
-                                                  </button>
-                                                </div>
-                                              </div>
-                                            )}
-
-                                            {/* Note Editing UI */}
-                                            {isEditingNote && (
-                                              <div className="bg-primary/10 border border-primary/30 rounded-xl p-3 space-y-3 animate-in fade-in slide-in-from-top-2">
-                                                <p className="text-primary text-xs font-bold text-right">
-                                                  {order.order_note?.trim()
-                                                    ? (language === 'ar' ? 'تعديل الملاحظة:' : 'Edit Note:')
-                                                    : (language === 'ar' ? 'إضافة ملاحظة:' : 'Add Note:')}
-                                                </p>
-                                                <textarea
-                                                  value={editedNote}
-                                                  onChange={(e) => setEditedNote(e.target.value)}
-                                                  className="w-full bg-dark border border-primary/50 rounded-lg p-2 text-white text-right text-xs resize-none"
-                                                  rows={2}
-                                                  dir="rtl"
-                                                  placeholder={language === 'ar' ? 'اكتب ملاحظتك هنا...' : 'Write note...'}
-                                                  autoFocus
-                                                />
-                                                <div className="flex gap-2">
-                                                  <button
-                                                    onClick={async () => {
-                                                      const noteToSave = editedNote.trim();
-                                                      await supabase
-                                                        .from('orders')
-                                                        .update({ order_note: noteToSave })
-                                                        .eq('id', order.id);
-                                                      setEditingNoteOrderId(null);
-                                                      fetchOrders();
-                                                    }}
-                                                    className="flex-1 bg-green-600 text-white text-xs py-2 rounded-lg font-bold flex items-center justify-center gap-1"
-                                                  >
-                                                    <Save className="w-3 h-3" />
-                                                    {language === 'ar' ? 'حفظ' : 'Save'}
-                                                  </button>
-                                                  <button
-                                                    onClick={() => setEditingNoteOrderId(null)}
-                                                    className="px-3 bg-gray-600 text-white text-xs py-2 rounded-lg"
-                                                  >
-                                                    {language === 'ar' ? 'إلغاء' : 'Cancel'}
-                                                  </button>
-                                                </div>
-                                              </div>
-                                            )}
-
-                                            <div>
-                                              <p className="text-white/60 text-[10px] font-bold mb-2 text-right">{language === 'ar' ? 'الأصناف' : 'ITEMS'}</p>
-                                              <div className="space-y-1.5">
-                                                {order.items.map(item => (
-                                                  <div key={item.id} className="flex items-center justify-between text-[11px] bg-white/5 p-2 rounded-xl border border-white/5">
-                                                    <span className="text-primary font-bold">{item.subtotal} {language === 'ar' ? 'ج' : 'EG'}</span>
-                                                    <div className="text-right">
-                                                      <span className="text-white font-medium">{item.item_name}</span>
-                                                      <span className="text-primary ml-2 font-black">x{item.quantity}</span>
-                                                    </div>
-                                                  </div>
-                                                ))}
-                                              </div>
-                                            </div>
-
-                                            <div className="bg-primary/5 rounded-2xl p-3 border border-primary/20 space-y-2">
-                                              <div className="flex justify-between items-center text-[11px] text-gray-400">
-                                                <span className="font-bold">{itemsTotal} {language === 'ar' ? 'ج' : 'EG'}</span>
-                                                <span>{language === 'ar' ? 'إجمالي الأصناف' : 'Items Total'}</span>
-                                              </div>
-                                              {discount > 0 && (
-                                                <div className="flex justify-between items-center text-green-400 text-[11px]">
-                                                  <span className="font-bold">-{discount} {language === 'ar' ? 'ج' : 'EG'}</span>
-                                                  <span>{language === 'ar' ? 'كوبون الخصم' : 'Discount Coupon'}</span>
-                                                </div>
-                                              )}
-                                              {(order.delivery_method === 'delivery' || deliveryFee > 0) && (
-                                                <div className="flex justify-between items-center text-[11px] text-gray-400">
-                                                  <span className="font-bold">
-                                                    {deliveryFee > 0 ? `${deliveryFee} ${language === 'ar' ? 'ج' : 'EG'}` : (language === 'ar' ? 'مجاني' : 'Free')}
-                                                  </span>
-                                                  <span>{language === 'ar' ? 'التوصيل' : 'Delivery Fee'}</span>
-                                                </div>
-                                              )}
-                                              <div className="flex justify-between items-center text-white border-t border-primary/20 pt-2 mt-2">
-                                                <span className="font-black text-lg text-primary">{order.total_amount} {language === 'ar' ? 'ج' : 'EG'}</span>
-                                                <span className="font-black text-sm">{language === 'ar' ? 'الإجمالي' : 'Total'}</span>
-                                              </div>
-                                            </div>
-
-                                            {/* Note Display if exists and not editing */}
-                                            {order.notes && order.notes.length > 0 && (
-                                              <div className="bg-yellow-900/20 border border-yellow-500/50 rounded-lg p-3 flex flex-col items-end gap-2 mt-2 mb-2">
-                                                <div className="flex items-center gap-2">
-                                                  <span className="text-[10px] text-yellow-300 font-bold">{language === 'ar' ? 'ملاحظة الأوبراتور:' : 'Operator Note:'}</span>
-                                                  <StickyNote className="w-4 h-4 text-yellow-300" />
-                                                </div>
-                                                {order.notes.map(note => (
-                                                  <p key={note.id} className="text-xs text-yellow-200 text-right">{note.note}</p>
-                                                ))}
-                                              </div>
-                                            )}
-
-                                            {order.order_note && !isEditingNote && (
-                                              <div className="bg-primary/10 border border-primary/20 rounded-xl p-3 flex items-start gap-3">
-                                                <StickyNote className="w-4 h-4 text-primary mt-0.5" />
-                                                <div className="flex-1">
-                                                  <p className="text-[10px] text-primary/60 font-bold mb-1 text-right">{language === 'ar' ? 'ملاحظة الطلب:' : 'Order Note:'}</p>
-                                                  <p className="text-xs text-white text-right">{order.order_note}</p>
-                                                </div>
-                                              </div>
-                                            )}
+                                          <div className="flex items-center gap-2">
+                                            <span className="bg-primary/10 border border-primary/20 text-primary text-[10px] font-black px-2 py-0.5 rounded-full">
+                                              {(() => { const t = order.items.reduce((s, i) => s + i.quantity, 0); return language === 'ar' ? `${t} صنف` : `${t} item${t !== 1 ? 's' : ''}`; })()}
+                                            </span>
+                                            <span className="text-primary font-black text-base">
+                                              {order.total_amount} <span className="text-[10px] font-bold">{language === 'ar' ? 'ج' : 'EG'}</span>
+                                            </span>
                                           </div>
                                         </div>
                                       </div>
+
+                                      {/* Integrated toggle button at the bottom */}
+                                      <button
+                                        onClick={() => setFullScreenOrderId(order.id)}
+                                        className="w-full text-primary text-xs font-bold py-3 bg-primary/10 hover:bg-primary/20 transition-all mt-auto"
+                                      >
+                                        {language === 'ar' ? 'عرض التفاصيل' : 'Show Details'}
+                                      </button>
                                     </div>
                                   );
                                 })}
@@ -2829,7 +3079,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
 
                           {/* Past Orders List */}
                           <div className="space-y-4">
-                            <h4 className="text-white font-bold text-right text-lg border-t border-primary/20 pt-6">
+                            <h4 className="text-white font-bold text-start text-lg border-t border-primary/20 pt-6">
                               {language === 'ar' ? 'الطلبات السابقة' : 'Past Orders'}
                             </h4>
                             {pastOrders.length === 0 ? (
@@ -2848,7 +3098,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                     className="bg-dark/50 border border-primary/30 rounded-xl p-6"
                                   >
                                     <div className="flex items-start justify-between mb-4">
-                                      <div className="text-right flex-1">
+                                      <div className="text-start flex-1">
                                         <div className="flex items-center justify-end gap-2 mb-1">
                                           {order.isArchived && (
                                             <span className="bg-blue-600 text-white text-xs px-2 py-1 rounded-full font-bold flex items-center gap-1">
@@ -2877,17 +3127,22 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                     </div>
 
                                     <div className="border-t border-purple-500/30 pt-4 mb-4">
-                                      <h4 className="text-white font-bold mb-2 text-right">{language === 'ar' ? 'الأصناف:' : 'Items:'}</h4>
+                                      <h4 className="text-white font-bold mb-2 text-start">{language === 'ar' ? 'الأصناف:' : 'Items:'}</h4>
                                       <div className="space-y-2">
-                                        {order.items.map(item => (
-                                          <div key={item.id} className="flex items-center justify-between text-sm bg-gray-900/50 p-2 rounded">
+                                        {order.items.map(item => {
+                                          const { title, subtitle } = resolveOrderItemNames(item, language, catalogLookup);
+                                          return (
+                                          <div key={item.id} className="order-detail-item-row flex items-center justify-between text-sm p-2.5 rounded-lg">
                                             <span className="text-primary font-bold">{item.subtotal} {language === 'ar' ? 'ج' : 'EG'}</span>
-                                            <div className="text-right">
-                                              <span className="text-white">{item.item_name}</span>
+                                            <div className="text-start min-w-0">
+                                              <span className="text-white block">{title}</span>
+                                              {subtitle && (
+                                                <span className="text-gray-400 text-xs block">{subtitle}</span>
+                                              )}
                                               <span className="text-gray-400 mr-2">x{item.quantity}</span>
                                             </div>
                                           </div>
-                                        ))}
+                                        );})}
                                       </div>
                                     </div>
 
@@ -2953,62 +3208,9 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                               </button>
                                             )}
                                         </div>
-                                        {editingNoteOrderId === order.id ? (
-                                          <div className="space-y-2">
-                                            <textarea
-                                              value={editedNote}
-                                              onChange={(e) => setEditedNote(e.target.value)}
-                                              className="w-full bg-dark border border-primary rounded-lg p-2 text-white text-right resize-none"
-                                              rows={3}
-                                              dir="rtl"
-                                              placeholder={language === 'ar' ? 'اكتب ملاحظة...' : 'Write a note...'}
-                                            />
-                                            <div className="flex gap-2">
-                                              <button
-                                                onClick={async () => {
-                                                  try {
-                                                    if (!editedNote.trim()) {
-                                                      // Delete note if empty
-                                                      await supabase
-                                                        .from('orders')
-                                                        .update({ order_note: '' })
-                                                        .eq('id', order.id);
-                                                    } else {
-                                                      // Update note
-                                                      await supabase
-                                                        .from('orders')
-                                                        .update({ order_note: editedNote.trim() })
-                                                        .eq('id', order.id);
-                                                    }
-                                                    setEditingNoteOrderId(null);
-                                                    setEditedNote('');
-                                                    fetchOrders();
-                                                  } catch (error) {
-                                                    console.error('Error updating note:', error);
-                                                    alert(language === 'ar' ? 'حدث خطأ أثناء تحديث الملاحظة' : 'Error updating note');
-                                                  }
-                                                }}
-                                                className="flex-1 bg-green-600 hover:bg-green-500 text-white py-2 rounded-lg transition-colors font-bold flex items-center justify-center gap-2"
-                                              >
-                                                <Save className="w-4 h-4" />
-                                                {language === 'ar' ? 'حفظ' : 'Save'}
-                                              </button>
-                                              <button
-                                                onClick={() => {
-                                                  setEditingNoteOrderId(null);
-                                                  setEditedNote('');
-                                                }}
-                                                className="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-2 rounded-lg transition-colors"
-                                              >
-                                                {language === 'ar' ? 'إلغاء' : 'Cancel'}
-                                              </button>
-                                            </div>
-                                          </div>
-                                        ) : (
-                                          <p className="text-muted text-sm text-right">
-                                            {order.order_note || (language === 'ar' ? 'لا توجد ملاحظة' : 'No note')}
-                                          </p>
-                                        )}
+                                        <p className="text-muted text-sm text-start">
+                                          {order.order_note || (language === 'ar' ? 'لا توجد ملاحظة' : 'No note')}
+                                        </p>
                                       </div>
                                     )}
 
@@ -3019,7 +3221,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                           <StickyNote className="w-5 h-5 text-yellow-300" />
                                         </div>
                                         {order.notes.map(note => (
-                                          <p key={note.id} className="text-yellow-200 text-sm text-right">
+                                          <p key={note.id} className="text-yellow-200 text-sm text-start">
                                             {note.note}
                                           </p>
                                         ))}
@@ -3031,7 +3233,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                         <div className="flex items-center gap-2 mb-2 justify-end">
                                           <span className="text-red-300 font-bold">{language === 'ar' ? 'سبب الإلغاء' : 'Cancellation Reason'}</span>
                                         </div>
-                                        <p className="text-red-200 text-sm text-right">{order.cancellation_reason}</p>
+                                        <p className="text-red-200 text-sm text-start">{order.cancellation_reason}</p>
                                       </div>
                                     )}
 
@@ -3059,36 +3261,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                                       </div>
                                     </div>
 
-                                    {cancelOrderId === order.id && (
-                                      <div className="mt-4 bg-red-900/20 border border-red-500 rounded-lg p-4">
-                                        <label className="block text-red-300 mb-2 text-right">{language === 'ar' ? 'سبب الإلغاء' : 'Cancellation Reason'}</label>
-                                        <textarea
-                                          value={cancelReason}
-                                          onChange={(e) => setCancelReason(e.target.value)}
-                                          className="w-full bg-gray-800 border border-red-500 rounded-lg p-3 text-white text-right resize-none"
-                                          rows={3}
-                                          placeholder={language === 'ar' ? 'الرجاء كتابة سبب الإلغاء...' : 'Please enter cancellation reason...'}
-                                          dir={language === 'ar' ? 'rtl' : 'ltr'}
-                                        />
-                                        <div className="flex gap-2 mt-2">
-                                          <button
-                                            onClick={() => {
-                                              setCancelOrderId(null);
-                                              setCancelReason('');
-                                            }}
-                                            className="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-2 rounded-lg transition-colors"
-                                          >
-                                            {language === 'ar' ? 'إلغاء' : 'Cancel'}
-                                          </button>
-                                          <button
-                                            onClick={() => handleCancelOrder(order.id)}
-                                            className="flex-1 bg-red-600 hover:bg-red-500 text-white py-2 rounded-lg transition-colors font-bold"
-                                          >
-                                            {language === 'ar' ? 'تأكيد الإلغاء' : 'Confirm Cancellation'}
-                                          </button>
-                                        </div>
-                                      </div>
-                                    )}
+
                                   </div>
                                 );
                               })
@@ -3102,7 +3275,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
                   </div>
                 )}
               </>
-            )}
+            </div>
           </div>
         </div>
         {settingsView === 'map' && (
@@ -3140,7 +3313,7 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
       <style>{`
         .profile-dropdown-desktop {
           animation: profileDockSheet 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
-          transition: max-width 320ms cubic-bezier(0.22, 1, 0.36, 1);
+          transition: all 320ms cubic-bezier(0.22, 1, 0.36, 1);
         }
         @keyframes profileDockSheet {
           from {
@@ -3265,13 +3438,13 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
               </h4>
             </div>
 
-            <p className="text-sm text-muted text-right leading-relaxed mb-2">
+            <p className="text-sm text-muted text-start leading-relaxed mb-2">
               {language === 'ar'
                 ? 'هل أنت متأكد من تسجيل الخروج من هذا الحساب؟'
                 : 'Are you sure you want to logout from this account?'}
             </p>
 
-            <div className="rounded-xl border border-primary/25 bg-primary/5 p-3 text-right mb-5">
+            <div className="rounded-xl border border-primary/25 bg-primary/5 p-3 text-start mb-5">
               <p className="text-sm font-bold text-white">{logoutConfirm.name || (language === 'ar' ? 'بدون اسم' : 'No Name')}</p>
               <p className="text-xs text-muted mt-0.5" dir="ltr">{logoutConfirm.phone}</p>
             </div>
@@ -3329,6 +3502,276 @@ export default function CustomerProfile({ isOpen, onClose, customerPhone, highli
         </div>
       )}
 
+      {/* ── Note Editor ── centered floating card, no backdrop overlay */}
+      {editingNoteOrderId && typeof document !== 'undefined' && createPortal(
+        (() => {
+          const close = () => { setEditingNoteOrderId(null); setEditedNote(''); };
+          return (
+            <div
+              className="fixed inset-0 z-[250] flex items-center justify-center p-5"
+              onClick={(e) => { e.stopPropagation(); close(); }}
+            >
+              <div
+                className="w-full max-w-sm bg-dark border border-primary/50 rounded-3xl shadow-[0_8px_60px_rgba(0,0,0,0.9)] overflow-hidden animate-in zoom-in-95 fade-in duration-200"
+                onClick={(e) => e.stopPropagation()}
+                dir={language === 'ar' ? 'rtl' : 'ltr'}
+              >
+                {/* Header */}
+                <div className="flex items-center justify-between px-5 pt-5 pb-3">
+                  <h3 className="text-sm font-black text-white">{language === 'ar' ? 'ملاحظة الطلب' : 'Order Note'}</h3>
+                </div>
+
+                {/* Textarea */}
+                <div className="px-5 pb-3">
+                  <textarea
+                    value={editedNote}
+                    onChange={(e) => setEditedNote(e.target.value)}
+                    className="w-full h-[130px] bg-white/5 border border-primary/30 rounded-2xl p-3 text-white text-start text-sm resize-none focus:border-primary focus:ring-2 focus:ring-primary/20 outline-none leading-relaxed"
+                    dir="rtl"
+                    placeholder={language === 'ar' ? 'اكتب ملاحظتك هنا...' : 'Write your note here...'}
+                    autoFocus
+                  />
+                </div>
+
+                {/* Actions */}
+                <div className="flex gap-2 px-5 pb-5">
+                  <button
+                    type="button"
+                    onClick={close}
+                    className="flex-1 rounded-2xl border border-white/20 bg-white/5 py-2.5 text-sm font-black text-white transition-colors hover:bg-white/10 active:scale-95"
+                  >
+                    {language === 'ar' ? 'إلغاء' : 'Cancel'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { if (editingNoteOrderId) void handleSaveNote(editingNoteOrderId); }}
+                    className="flex-1 rounded-2xl bg-primary py-2.5 text-sm font-black text-white transition-all hover:bg-primary/90 active:scale-95 flex items-center justify-center gap-2"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    {language === 'ar' ? 'حفظ' : 'Save'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()
+        , document.body
+      )}
+
+      {/* ── Cancel Order ── centered floating card, no backdrop overlay */}
+      {cancelOrderId && typeof document !== 'undefined' && createPortal(
+        (() => {
+          const close = () => { setCancelOrderId(null); setCancelReason(''); };
+          return (
+            <div
+              className="fixed inset-0 z-[250] flex items-center justify-center p-5"
+              onClick={(e) => { e.stopPropagation(); close(); }}
+            >
+              <div
+                className="w-full max-w-sm bg-dark border border-red-500/50 rounded-3xl shadow-[0_8px_60px_rgba(0,0,0,0.9)] overflow-hidden animate-in zoom-in-95 fade-in duration-200"
+                onClick={(e) => e.stopPropagation()}
+                dir={language === 'ar' ? 'rtl' : 'ltr'}
+              >
+                {/* Header */}
+                <div className="flex items-center justify-between px-5 pt-5 pb-3">
+                  <h3 className="text-sm font-black text-red-400">{language === 'ar' ? 'إلغاء الطلب' : 'Cancel Order'}</h3>
+                </div>
+
+                {/* Hint */}
+                <div className="mx-5 mb-3 bg-red-900/20 border border-red-500/20 rounded-2xl px-4 py-3 text-start">
+                  <p className="text-[11px] text-red-300/80">
+                    {language === 'ar' ? 'اكتب سبب الإلغاء لإرساله للمراجعة.' : 'Write the reason to send a cancellation request.'}
+                  </p>
+                </div>
+
+                {/* Textarea */}
+                <div className="px-5 pb-3">
+                  <textarea
+                    value={cancelReason}
+                    onChange={(e) => setCancelReason(e.target.value)}
+                    className="w-full h-[120px] bg-white/5 border border-red-500/30 rounded-2xl p-3 text-white text-start text-sm resize-none focus:border-red-500 focus:ring-2 focus:ring-red-500/20 outline-none leading-relaxed"
+                    dir="rtl"
+                    placeholder={language === 'ar' ? 'اكتب سبب الإلغاء هنا...' : 'Write cancellation reason here...'}
+                    autoFocus
+                  />
+                </div>
+
+                {/* Actions */}
+                <div className="flex gap-2 px-5 pb-5">
+                  <button
+                    type="button"
+                    onClick={close}
+                    className="flex-1 rounded-2xl border border-white/20 bg-white/5 py-2.5 text-sm font-black text-white transition-colors hover:bg-white/10 active:scale-95"
+                  >
+                    {language === 'ar' ? 'تراجع' : 'Back'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { if (cancelOrderId) void handleCancelOrder(cancelOrderId); }}
+                    disabled={!cancelReason.trim()}
+                    className="flex-1 rounded-2xl bg-red-600 disabled:opacity-40 disabled:cursor-not-allowed py-2.5 text-sm font-black text-white transition-all hover:bg-red-500 active:scale-95 flex items-center justify-center gap-2"
+                  >
+                    <XCircle className="w-3.5 h-3.5" />
+                    {language === 'ar' ? 'تأكيد' : 'Confirm'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()
+        , document.body
+      )}
+
+      {/* Full Screen Order Details Modal */}
+      {fullScreenOrderId && phoneChrome && typeof document !== 'undefined' && createPortal(
+        (() => {
+          const order = orders.find(o => o.id === fullScreenOrderId);
+          if (!order) return null;
+
+          const itemsTotal = order.items.reduce((sum, item) => sum + item.subtotal, 0);
+          const discount = order.applied_coupon_discount_percent
+            ? Math.round((itemsTotal * order.applied_coupon_discount_percent) / 100)
+            : 0;
+          const deliveryFee = order.total_amount - (itemsTotal - discount);
+
+          return (
+            <>
+              <div
+                className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[199] animate-in fade-in duration-300"
+                onClick={(e) => { e.stopPropagation(); setFullScreenOrderId(null); }}
+              />
+              <div
+                onClick={(e) => e.stopPropagation()}
+                className={`fixed inset-0 sm:inset-y-0 sm:left-auto sm:right-0 sm:w-[450px] sm:border-l border-primary/20 z-[200] bg-dark flex flex-col shadow-2xl animate-in slide-in-from-${language === 'ar' ? 'right' : 'bottom'}-full sm:slide-in-from-right-full duration-300`}
+              >
+                <div className="flex items-center justify-between p-4 border-b border-white/10 bg-dark/95 shrink-0 relative z-20 overflow-visible">
+                  <button
+                    onClick={() => setFullScreenOrderId(null)}
+                    className="h-9 w-9 flex items-center justify-center rounded-full bg-white/10 text-white shadow-sm backdrop-blur-sm transition-colors hover:bg-white/20 focus:outline-none shrink-0"
+                  >
+                    {language === 'ar' ? <ChevronRight className="h-5 w-5" /> : <ChevronLeft className="h-5 w-5" />}
+                  </button>
+                  <h2 className="text-lg font-black text-white">{language === 'ar' ? 'تفاصيل الطلب' : 'Order Details'}</h2>
+                  <div className="relative">
+                    {!['completed', 'cancelled', 'rejected'].includes(order.status) && (
+                      <>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setShowActionMenu(showActionMenu === order.id ? null : order.id);
+                          }}
+                          className="p-2 bg-primary/10 hover:bg-primary/20 rounded-xl transition-colors text-primary"
+                        >
+                          <Edit2 className="w-5 h-5" />
+                        </button>
+                        <OrderOptionsDropdown
+                          order={order}
+                          language={language}
+                          isOpen={showActionMenu === order.id}
+                          onClose={() => setShowActionMenu(null)}
+                          onPickupTime={() => setShowUpdateTimePicker(order.id)}
+                          onEditOrder={() => onStartOrderEdit?.(order)}
+                          onCancelOrder={() => { setCancelOrderId(order.id); setCancelReason(''); }}
+                          onEditNote={() => { setEditingNoteOrderId(order.id); setEditedNote(order.order_note || ''); }}
+                          overlayZClass="z-[205]"
+                          menuZClass="z-[206]"
+                        />
+                      </>
+                    )}
+                  </div>
+                </div>
+
+
+                <div className="flex-1 overflow-y-auto p-4 space-y-6 custom-scrollbar" dir={language === 'ar' ? 'rtl' : 'ltr'}>
+                  {/* Header Card */}
+                  <div className="bg-primary/10 rounded-2xl p-4 border border-primary/20 text-center relative overflow-hidden">
+                    <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-primary/50 to-transparent"></div>
+                    <p className="text-primary text-xs font-bold mb-1">{language === 'ar' ? 'رقم الطلب' : 'Order ID'}</p>
+                    <p className="text-3xl font-black text-white tracking-wider">#{order.order_number}</p>
+                    {(() => {
+                      const timer = getPickupTimerMeta(order);
+                      const remainingLabel = getRemainingLabel(timer?.deadlineRaw, language);
+                      if (!timer || !remainingLabel) return null;
+                      return (
+                        <div className="mt-3 inline-flex items-center justify-center gap-2 bg-primary/20 px-3 py-1.5 rounded-lg border border-primary/30">
+                          <Clock className={`w-4 h-4 ${timer.expired ? 'text-red-400' : 'text-primary'}`} />
+                          <span className={`text-sm font-bold ${timer.expired ? 'text-red-400' : 'text-white'}`}>{remainingLabel}</span>
+                        </div>
+                      );
+                    })()}
+                  </div>
+
+                  {/* Items */}
+                  <OrderItemsSlider items={order.items} language={language} catalog={catalogLookup} />
+                  {/* Timeline */}
+                  <div className="bg-dark/40 rounded-2xl p-4 border border-primary/10">
+                    <h3 className="text-sm font-black text-white mb-3 px-1">{language === 'ar' ? 'حالة الطلب' : 'Order Status'}</h3>
+                    <OrderTimeline order={order} language={language} />
+                  </div>
+
+
+
+                  {/* Operator Note Display */}
+                  {order.notes && order.notes.length > 0 && (
+                    <div className="bg-yellow-900/20 border border-yellow-500/50 rounded-lg p-3 flex flex-col items-end gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-yellow-300 font-bold">{language === 'ar' ? 'ملاحظة الأوبراتور:' : 'Operator Note:'}</span>
+                        <StickyNote className="w-4 h-4 text-yellow-300" />
+                      </div>
+                      {order.notes.map(note => (
+                        <p key={note.id} className="text-xs text-yellow-200 text-start">{note.note}</p>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Customer Order Note Display */}
+                  {order.order_note && (
+                    <div className="bg-primary/10 border border-primary/20 rounded-xl p-3 flex items-start gap-3">
+                      <StickyNote className="w-4 h-4 text-primary mt-0.5" />
+                      <div className="flex-1">
+                        <p className="text-[10px] text-primary/60 font-bold mb-1 text-start">{language === 'ar' ? 'ملاحظة الطلب:' : 'Order Note:'}</p>
+                        <p className="text-xs text-white text-start">{order.order_note}</p>
+                      </div>
+                    </div>
+                  )}
+
+
+
+                  {/* Totals Box */}
+                  <div className="bg-primary/5 rounded-2xl p-4 border border-primary/20 space-y-3">
+                    <div className="flex justify-between items-center text-sm text-gray-400">
+                      <span className="font-bold text-white">{itemsTotal} <span className="text-xs">{language === 'ar' ? 'ج' : 'EG'}</span></span>
+                      <span>{language === 'ar' ? 'إجمالي الأصناف' : 'Items Total'}</span>
+                    </div>
+                    {discount > 0 && (
+                      <div className="flex justify-between items-center text-sm text-green-400">
+                        <span className="font-bold">-{discount} <span className="text-xs">{language === 'ar' ? 'ج' : 'EG'}</span></span>
+                        <span>{language === 'ar' ? 'خصم الكوبون' : 'Coupon Discount'}</span>
+                      </div>
+                    )}
+                    {(order.delivery_method === 'delivery' || deliveryFee > 0) && (
+                      <div className="flex justify-between items-center text-sm text-gray-400">
+                        <span className="font-bold text-white">
+                          {deliveryFee > 0 ? `${deliveryFee} ${language === 'ar' ? 'ج' : 'EG'}` : (language === 'ar' ? 'مجاني' : 'Free')}
+                        </span>
+                        <span>{language === 'ar' ? 'رسوم التوصيل' : 'Delivery Fee'}</span>
+                      </div>
+                    )}
+                    <div className="h-px bg-white/10 my-2"></div>
+                    <div className="flex justify-between items-center pt-2">
+                      <span className="font-black text-2xl text-primary">{order.total_amount} <span className="text-sm">{language === 'ar' ? 'ج' : 'EG'}</span></span>
+                      <span className="font-black text-lg text-white">{language === 'ar' ? 'الإجمالي' : 'Total'}</span>
+                    </div>
+                  </div>
+
+                  <div className="h-4"></div>
+                </div>
+              </div>
+            </>
+          );
+        })(),
+        document.body
+      )}
 
     </div>
   );
@@ -3537,13 +3980,12 @@ function AddAccountBlock({ language, phoneChrome, onBack, onSuccess }: AddAccoun
       <button
         type="button"
         onClick={handleStepBack}
-        className="inline-flex items-center gap-1 rounded-lg border border-white/20 bg-black/25 px-3 py-1.5 text-xs font-black text-white"
-      >
-        <ChevronRight className="h-3.5 w-3.5" />
-        {language === 'ar' ? 'رجوع' : 'Back'}
-      </button>
+        className="h-9 w-9 flex items-center justify-center rounded-full bg-white/10 text-white shadow-sm backdrop-blur-sm transition-colors hover:bg-white/20 focus:outline-none shrink-0"
+                  >
+                    {language === 'ar' ? <ChevronRight className="h-5 w-5" /> : <ChevronLeft className="h-5 w-5" />}
+                  </button>
 
-      <div className="text-right">
+      <div className="text-start">
         <h4 className="text-sm font-black text-white">{stepTitle}</h4>
         <p className="text-xs text-muted mt-0.5">{stepSubtitle}</p>
       </div>
@@ -3552,7 +3994,7 @@ function AddAccountBlock({ language, phoneChrome, onBack, onSuccess }: AddAccoun
       {step === 'phone' && (
         <form onSubmit={handlePhoneSubmit} className="space-y-4">
           <div>
-            <label className="mb-1 block text-right text-xs text-muted">
+            <label className="mb-1 block text-start text-xs text-muted">
               {language === 'ar' ? 'رقم الهاتف' : 'Phone Number'}
             </label>
             <input
@@ -3567,13 +4009,13 @@ function AddAccountBlock({ language, phoneChrome, onBack, onSuccess }: AddAccoun
                 if (error) setError(null);
               }}
               placeholder="01xxxxxxxxx"
-              className="w-full rounded-xl border border-primary/35 bg-dark px-4 py-3 text-right text-sm text-white focus:border-primary/60 outline-none"
+              className="w-full rounded-xl border border-primary/35 bg-dark px-4 py-3 text-start text-sm text-white focus:border-primary/60 outline-none"
               dir="ltr"
             />
           </div>
 
           {error && (
-            <div className="flex items-center gap-2 rounded-lg bg-red-500/10 p-3 text-right text-xs text-red-500 border border-red-500/20">
+            <div className="flex items-center gap-2 rounded-lg bg-red-500/10 p-3 text-start text-xs text-red-500 border border-red-500/20">
               <AlertTriangle className="h-4 w-4 shrink-0" />
               <p className="flex-1">{error}</p>
             </div>
@@ -3596,13 +4038,13 @@ function AddAccountBlock({ language, phoneChrome, onBack, onSuccess }: AddAccoun
       {/* Step 2a: Password for existing protected account */}
       {step === 'password' && (
         <form onSubmit={handlePasswordSubmit} className="space-y-4">
-          <div className="rounded-xl border border-primary/25 bg-primary/5 p-3 text-right">
+          <div className="rounded-xl border border-primary/25 bg-primary/5 p-3 text-start">
             <p className="text-xs text-muted">{language === 'ar' ? 'رقم الهاتف' : 'Phone Number'}</p>
             <p className="text-sm font-bold text-white mt-0.5" dir="ltr">{filterDigits(phone)}</p>
           </div>
 
           <div>
-            <label className="mb-1 block text-right text-xs text-muted">
+            <label className="mb-1 block text-start text-xs text-muted">
               {language === 'ar' ? 'كلمة المرور' : 'Password'}
             </label>
             <div className="relative">
@@ -3613,7 +4055,7 @@ function AddAccountBlock({ language, phoneChrome, onBack, onSuccess }: AddAccoun
                 value={password}
                 onChange={e => { setPassword(e.target.value); setError(null); }}
                 placeholder="••••••••"
-                className="w-full rounded-xl border border-primary/35 bg-dark px-4 py-3 text-right text-sm text-white focus:border-primary/60 outline-none"
+                className="w-full rounded-xl border border-primary/35 bg-dark px-4 py-3 text-start text-sm text-white focus:border-primary/60 outline-none"
               />
               <Lock className="absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-muted" />
             </div>
@@ -3626,14 +4068,14 @@ function AddAccountBlock({ language, phoneChrome, onBack, onSuccess }: AddAccoun
               setResetNewRecovery(null);
               setError(null);
             }}
-            className="text-[11px] font-black text-amber-200/90 hover:text-amber-200 underline text-right w-full"
+            className="text-[11px] font-black text-amber-200/90 hover:text-amber-200 underline text-start w-full"
           >
             {language === 'ar' ? 'هل نسيت كلمة المرور؟' : 'Forgot password?'}
           </button>
 
           {forgotMode && (
             <div className="rounded-lg border border-amber-500/30 bg-black/20 p-2 space-y-2">
-              <p className="text-[11px] text-amber-100/85 text-right leading-relaxed">
+              <p className="text-[11px] text-amber-100/85 text-start leading-relaxed">
                 {language === 'ar'
                   ? 'أدخل كود الاسترجاع الذي حصلت عليه عند إنشاء كلمة المرور، ثم عيّن كلمة مرور جديدة.'
                   : 'Enter your numeric recovery code, then set a new password.'}
@@ -3645,7 +4087,7 @@ function AddAccountBlock({ language, phoneChrome, onBack, onSuccess }: AddAccoun
                   setRecoveryCodeInput(filterDigits(e.target.value).slice(0, 6));
                   setResetErr(null);
                 }}
-                className="w-full bg-dark border border-amber-500/35 rounded-lg px-3 py-2 text-white text-right text-sm font-black"
+                className="w-full bg-dark border border-amber-500/35 rounded-lg px-3 py-2 text-white text-start text-sm font-black"
                 placeholder={language === 'ar' ? 'كود الاسترجاع (6 أرقام)' : 'Recovery code (6 digits)'}
                 dir="ltr"
               />
@@ -3657,7 +4099,7 @@ function AddAccountBlock({ language, phoneChrome, onBack, onSuccess }: AddAccoun
                     setResetPwd1(e.target.value);
                     setResetErr(null);
                   }}
-                  className="w-full bg-dark border border-amber-500/35 rounded-lg px-3 py-2 text-white text-right text-sm"
+                  className="w-full bg-dark border border-amber-500/35 rounded-lg px-3 py-2 text-white text-start text-sm"
                   placeholder={language === 'ar' ? 'كلمة مرور جديدة' : 'New password'}
                   dir="ltr"
                 />
@@ -3668,12 +4110,12 @@ function AddAccountBlock({ language, phoneChrome, onBack, onSuccess }: AddAccoun
                     setResetPwd2(e.target.value);
                     setResetErr(null);
                   }}
-                  className="w-full bg-dark border border-amber-500/35 rounded-lg px-3 py-2 text-white text-right text-sm"
+                  className="w-full bg-dark border border-amber-500/35 rounded-lg px-3 py-2 text-white text-start text-sm"
                   placeholder={language === 'ar' ? 'تأكيد كلمة المرور' : 'Confirm password'}
                   dir="ltr"
                 />
               </div>
-              {resetErr && <p className="text-red-400 text-[11px] font-black text-right">{resetErr}</p>}
+              {resetErr && <p className="text-red-400 text-[11px] font-black text-start">{resetErr}</p>}
               {resetNewRecovery && (
                 <div className="rounded-lg border border-amber-500/35 bg-black/25 p-2 text-center">
                   <p className="text-[11px] text-amber-100/85 mb-1">
@@ -3761,7 +4203,7 @@ function AddAccountBlock({ language, phoneChrome, onBack, onSuccess }: AddAccoun
           )}
 
           {error && (
-            <div className="flex items-center gap-2 rounded-lg bg-red-500/10 p-3 text-right text-xs text-red-500 border border-red-500/20">
+            <div className="flex items-center gap-2 rounded-lg bg-red-500/10 p-3 text-start text-xs text-red-500 border border-red-500/20">
               <AlertTriangle className="h-4 w-4 shrink-0" />
               <p className="flex-1">{error}</p>
             </div>
@@ -3784,13 +4226,13 @@ function AddAccountBlock({ language, phoneChrome, onBack, onSuccess }: AddAccoun
       {/* Step 2b: Name for new customer */}
       {step === 'name' && (
         <form onSubmit={handleNameSubmit} className="space-y-4">
-          <div className="rounded-xl border border-primary/25 bg-primary/5 p-3 text-right">
+          <div className="rounded-xl border border-primary/25 bg-primary/5 p-3 text-start">
             <p className="text-xs text-muted">{language === 'ar' ? 'رقم الهاتف' : 'Phone Number'}</p>
             <p className="text-sm font-bold text-white mt-0.5" dir="ltr">{filterDigits(phone)}</p>
           </div>
 
           <div>
-            <label className="mb-1 block text-right text-xs text-muted">
+            <label className="mb-1 block text-start text-xs text-muted">
               {language === 'ar' ? 'الاسم' : 'Name'}
             </label>
             <input
@@ -3799,12 +4241,12 @@ function AddAccountBlock({ language, phoneChrome, onBack, onSuccess }: AddAccoun
               value={name}
               onChange={e => { setName(e.target.value); setError(null); }}
               placeholder={language === 'ar' ? 'أدخل اسمك' : 'Enter your name'}
-              className="w-full rounded-xl border border-primary/35 bg-dark px-4 py-3 text-right text-sm text-white focus:border-primary/60 outline-none"
+              className="w-full rounded-xl border border-primary/35 bg-dark px-4 py-3 text-start text-sm text-white focus:border-primary/60 outline-none"
             />
           </div>
 
           {error && (
-            <div className="flex items-center gap-2 rounded-lg bg-red-500/10 p-3 text-right text-xs text-red-500 border border-red-500/20">
+            <div className="flex items-center gap-2 rounded-lg bg-red-500/10 p-3 text-start text-xs text-red-500 border border-red-500/20">
               <AlertTriangle className="h-4 w-4 shrink-0" />
               <p className="flex-1">{error}</p>
             </div>
@@ -3823,6 +4265,8 @@ function AddAccountBlock({ language, phoneChrome, onBack, onSuccess }: AddAccoun
           </button>
         </form>
       )}
+
+
     </div>
   );
 }

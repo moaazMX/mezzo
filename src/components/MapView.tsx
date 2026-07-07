@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { X, ExternalLink, MapPin } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
+import { useTheme } from '../contexts/ThemeContext';
 
 interface MapViewProps {
   isOpen: boolean;
@@ -13,6 +14,7 @@ interface MapViewProps {
 
 export default function MapView({ isOpen, onClose, latitude, longitude, customerName, address }: MapViewProps) {
   const { language } = useLanguage();
+  const { theme } = useTheme();
   const [mapError, setMapError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -139,11 +141,10 @@ export default function MapView({ isOpen, onClose, latitude, longitude, customer
             </div>
           )}
 
-          {/* OpenStreetMap Embed using iframe with dark theme */}
           <iframe
             width="100%"
             height="100%"
-            style={{ border: 0, filter: 'invert(0.9) hue-rotate(180deg) brightness(0.8)' }}
+            style={{ border: 0, filter: theme === 'dark' ? 'invert(0.9) hue-rotate(180deg) brightness(0.8)' : 'none' }}
             loading="lazy"
             allowFullScreen
             referrerPolicy="no-referrer-when-downgrade"

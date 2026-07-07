@@ -121,7 +121,7 @@ export interface Order {
   id: string;
   customer_id: string;
   order_number: string;
-  status: 'under_review' | 'preparing' | 'on_way' | 'arrived' | 'completed' | 'cancelled' | 'cancellation_pending';
+  status: 'under_review' | 'preparing' | 'on_way' | 'arrived' | 'completed' | 'cancelled' | 'cancellation_pending' | 'rejected';
   payment_method: 'cash' | 'instant_transfer';
   total_amount: number;
   cancellation_reason: string;
@@ -157,6 +157,7 @@ export interface OrderItem {
   unit_price: number;
   subtotal: number;
   rate_discount_percent?: number | null;
+  image_url?: string;
 }
 
 export interface CustomerNote {

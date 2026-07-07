@@ -2,10 +2,12 @@ import { Download, Gamepad2, ShoppingCart, User, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Category } from '../lib/supabase';
 import { useLanguage } from '../contexts/LanguageContext';
+import { useMenuDisplay } from '../contexts/MenuDisplayContext';
 import '@fontsource/press-start-2p';
 import { supabase } from '../lib/supabase';
 import { useRealtimeRefetch } from '../hooks/useRealtimeSubscription';
 import RealtimeIndicator from './RealtimeIndicator';
+import HeaderSlideshow from './HeaderSlideshow';
 
 interface HeaderProps {
   cartCount: number;
@@ -14,18 +16,27 @@ interface HeaderProps {
   hasOrders: boolean;
   ordersCount: number;
   categories: Category[];
+  activeCategoryId?: string | null;
   onCategorySelect: (categoryId: string) => void;
 }
 
-export default function Header({ cartCount, onCartClick, onProfileClick, hasOrders, ordersCount, categories, onCategorySelect }: HeaderProps) {
+export default function Header({ cartCount, onCartClick, onProfileClick, hasOrders, ordersCount, categories, activeCategoryId, onCategorySelect }: HeaderProps) {
   const { language } = useLanguage();
+  const display = useMenuDisplay();
   const [rotation, setRotation] = useState(0);
   const [isLogoClicked, setIsLogoClicked] = useState(false);
   const [gamepadRotation, setGamepadRotation] = useState({ left: 0, right: 0 });
   const [logoLightboxOpen, setLogoLightboxOpen] = useState(false);
   const [logoImageUrl, setLogoImageUrl] = useState<string>('/mx-brand-logo.png');
   const [rapidClickCount, setRapidClickCount] = useState(0);
-  const [lastLogoClickAt, setLastLogoClickAt] = useState<number>(0);
+  const [logoTapMenuEnabled, setLogoTapMenuEnabled] = useState(true);
+  const [headerDisplayMode, setHeaderDisplayMode] = useState<'logo' | 'slideshow' | 'none'>('logo');
+  const [slideshowImages, setSlideshowImages] = useState<string[]>([]);
+  const [slideshowAuto, setSlideshowAuto] = useState(true);
+  const [slideshowDirection, setSlideshowDirection] = useState<'horizontal' | 'vertical'>('horizontal');
+  const [headerHeightPx, setHeaderHeightPx] = useState(138);
+  const [slideshowIntervalSeconds, setSlideshowIntervalSeconds] = useState(5);
+  const [lastLogoClickAt, setLastLogoClickAt] = useState(0);
 
   const getDisplayLogoUrl = (url: string) => {
     try {
@@ -52,19 +63,100 @@ export default function Header({ cartCount, onCartClick, onProfileClick, hasOrde
     return () => clearInterval(interval);
   }, []);
 
-  const loadOperatorLogo = async () => {
-    const { data } = await supabase.from('settings').select('value').eq('key', 'logo_image_url').maybeSingle();
-    const url = typeof data?.value === 'string' ? data.value.trim() : '';
+  const loadHeaderSettings = async () => {
+    const { data } = await supabase.from('settings').select('key, value').in('key', [
+      'logo_image_url', 'logo_tap_menu_enabled', 'header_display_mode', 'slideshow_images',
+      'slideshow_auto', 'slideshow_direction', 'header_height_px', 'slideshow_interval_seconds',
+    ]);
+    const map = new Map((data || []).map((r) => [r.key, r.value]));
+    const url = map.get('logo_image_url')?.trim();
     if (url) setLogoImageUrl(url);
+    setLogoTapMenuEnabled(map.get('logo_tap_menu_enabled') !== 'false');
+    const mode = map.get('header_display_mode');
+    if (mode === 'slideshow' || mode === 'none') setHeaderDisplayMode(mode);
+    else setHeaderDisplayMode('logo');
+    setSlideshowAuto(map.get('slideshow_auto') !== 'false');
+    setSlideshowDirection(map.get('slideshow_direction') === 'vertical' ? 'vertical' : 'horizontal');
+    const heightRaw = parseInt(map.get('header_height_px') || '138', 10);
+    setHeaderHeightPx(Number.isFinite(heightRaw) ? Math.min(320, Math.max(80, heightRaw)) : 138);
+    const intervalRaw = parseFloat(map.get('slideshow_interval_seconds') || '5');
+    setSlideshowIntervalSeconds(Number.isFinite(intervalRaw) ? Math.min(60, Math.max(2, intervalRaw)) : 5);
+    try {
+      const raw = map.get('slideshow_images');
+      const parsed = raw ? JSON.parse(raw) : [];
+      setSlideshowImages(Array.isArray(parsed) ? parsed.filter((u): u is string => typeof u === 'string' && u.trim().length > 0) : []);
+    } catch {
+      setSlideshowImages([]);
+    }
   };
 
   useEffect(() => {
-    void loadOperatorLogo();
+    void loadHeaderSettings();
   }, []);
 
   useRealtimeRefetch('header-settings', ['settings'], () => {
-    void loadOperatorLogo();
+    void loadHeaderSettings();
   });
+
+  const overlayActionButtons = (
+    <div className="flex items-center gap-2 md:gap-3">
+      <button
+        data-profile-button
+        onClick={onProfileClick}
+        className="relative rounded-xl border border-white/25 bg-black/45 p-2.5 md:p-3 text-white shadow-lg backdrop-blur-md transition-all hover:bg-black/60 hover:scale-105"
+      >
+        <User className="h-5 w-5 md:h-6 md:w-6" />
+        {hasOrders && (
+          <span className="absolute -top-2 -left-2 flex h-5 min-w-[20px] items-center justify-center rounded-full border-2 border-black/40 bg-green-500 px-1 text-[10px] font-bold text-white animate-pulse">
+            {ordersCount > 9 ? '9+' : ordersCount}
+          </span>
+        )}
+      </button>
+      <button
+        data-cart-button
+        id="header-cart-icon"
+        onClick={onCartClick}
+        className="relative rounded-xl border border-white/25 bg-black/45 p-2.5 md:p-3 text-white shadow-lg backdrop-blur-md transition-all hover:bg-black/60 hover:scale-105"
+      >
+        <ShoppingCart className="h-5 w-5 md:h-6 md:w-6" />
+        {cartCount > 0 && (
+          <span className="absolute -top-2 -right-2 flex h-6 w-6 items-center justify-center rounded-full border-2 border-black/40 bg-red-600 text-xs font-bold text-white animate-pulse">
+            {cartCount}
+          </span>
+        )}
+      </button>
+    </div>
+  );
+
+  const headerActionButtons = (
+    <>
+      <button
+        data-profile-button
+        onClick={onProfileClick}
+        className="relative bg-surface/50 hover:bg-surface/80 p-3 rounded-xl border-2 border-muted/50 transition-all hover:scale-110"
+      >
+        <User className="w-6 h-6 text-muted" />
+        {hasOrders && (
+          <span className="absolute -top-2 -left-2 bg-green-500 text-white text-[10px] font-bold min-w-[20px] h-5 rounded-full flex items-center justify-center border-2 border-surface animate-pulse px-1">
+            {ordersCount > 9 ? '9+' : ordersCount}
+          </span>
+        )}
+      </button>
+      <button
+        data-cart-button
+        id="header-cart-icon"
+        onClick={onCartClick}
+        className="relative bg-surface/50 hover:bg-surface/80 p-3 rounded-xl border-2 border-muted/50 transition-all hover:scale-110"
+      >
+        <ShoppingCart className="w-6 h-6 text-muted" />
+        {cartCount > 0 && (
+          <span className="absolute -top-2 -right-2 bg-red-600 text-white text-xs font-bold w-6 h-6 rounded-full flex items-center justify-center border-2 border-surface animate-pulse">
+            {cartCount}
+          </span>
+        )}
+      </button>
+    </>
+  );
 
   const handleLogoClick = () => {
     setIsLogoClicked(true);
@@ -82,7 +174,7 @@ export default function Header({ cartCount, onCartClick, onProfileClick, hasOrde
     setLastLogoClickAt(now);
     setRapidClickCount(nextCount);
 
-    if (nextCount >= 5) {
+    if (logoTapMenuEnabled && nextCount >= 5) {
       setRapidClickCount(0);
       setLogoLightboxOpen(true);
     }
@@ -113,40 +205,39 @@ export default function Header({ cartCount, onCartClick, onProfileClick, hasOrde
 
   return (
     <>
+      {headerDisplayMode === 'slideshow' ? (
+        <header
+          className="relative overflow-hidden overscroll-none border-b-2 border-muted/30 shadow-2xl"
+          style={{ height: `${headerHeightPx}px`, touchAction: 'none' }}
+        >
+          <HeaderSlideshow
+            images={slideshowImages}
+            direction={slideshowDirection}
+            auto={slideshowAuto}
+            intervalSeconds={slideshowIntervalSeconds}
+            className="absolute inset-0 h-full w-full"
+          />
+          <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/35 via-black/5 to-black/20" />
+          <div className="relative z-10 flex h-full items-start justify-between p-3 md:px-4 md:py-4">
+            {overlayActionButtons}
+            <RealtimeIndicator className="hidden md:inline-flex shrink-0 rounded-lg border border-white/20 bg-black/40 px-2 py-1 backdrop-blur-md" showDot={false} />
+          </div>
+        </header>
+      ) : (
       <header className="relative bg-surface border-b-2 border-muted/30 shadow-2xl">
-        <div className="container mx-auto px-4 py-4 md:py-6 relative">
+        <div className="container mx-auto px-4 py-4 md:py-5 relative">
           <div className="flex flex-col gap-4">
-            <div className="hidden md:flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <button
-                  data-profile-button
-                  onClick={onProfileClick}
-                  className="relative bg-surface/50 hover:bg-surface/80 p-3 rounded-xl border-2 border-muted/50 transition-all hover:scale-110"
-                >
-                  <User className="w-6 h-6 text-muted" />
-                  {hasOrders && (
-                    <span className="absolute -top-2 -left-2 bg-green-500 text-white text-[10px] font-bold min-w-[20px] h-5 rounded-full flex items-center justify-center border-2 border-surface animate-pulse px-1">
-                      {ordersCount > 9 ? '9+' : ordersCount}
-                    </span>
-                  )}
-                </button>
-                <button
-                  data-cart-button
-                  id="header-cart-icon"
-                  onClick={onCartClick}
-                  className="relative bg-surface/50 hover:bg-surface/80 p-3 rounded-xl border-2 border-muted/50 transition-all hover:scale-110"
-                >
-                  <ShoppingCart className="w-6 h-6 text-muted" />
-                  {cartCount > 0 && (
-                    <span className="absolute -top-2 -right-2 bg-red-600 text-white text-xs font-bold w-6 h-6 rounded-full flex items-center justify-center border-2 border-surface animate-pulse">
-                      {cartCount}
-                    </span>
-                  )}
-                </button>
+            <div className="flex items-center gap-3 md:gap-4">
+              <div className="hidden md:flex items-center gap-3 shrink-0">
+                {headerActionButtons}
               </div>
-              <RealtimeIndicator className="hidden md:inline-flex" showDot={false} />
+
+              {headerDisplayMode === 'none' && <div className="hidden md:block flex-1" />}
+
+              <RealtimeIndicator className="hidden md:inline-flex shrink-0 ms-auto" showDot={false} />
             </div>
 
+            {headerDisplayMode === 'logo' && (
             <button
               onClick={handleLogoClick}
               className="mx-auto flex flex-col items-center justify-center gap-1 cursor-pointer group"
@@ -181,18 +272,24 @@ export default function Header({ cartCount, onCartClick, onProfileClick, hasOrde
                 Level Up Your Taste!
               </p>
             </button>
+            )}
           </div>
         </div>
       </header>
+      )}
 
-      {categories.length > 0 && (
+      {!display.hideSections && categories.length > 0 && (
         <div className="sticky top-0 z-40 border-t border-b border-muted/30 bg-dark/95 backdrop-blur-lg overflow-x-auto scrollbar-hide shadow-2xl">
           <div className="container mx-auto px-4 flex gap-3 py-3 min-w-max md:min-w-full">
             {categories.map(category => (
               <button
                 key={category.id}
-                onClick={() => onCategorySelect(category.id)}
-                className="bg-surface/50 hover:bg-primary/20 border-b-4 border-transparent hover:border-primary text-muted px-4 py-3 transition-all whitespace-nowrap flex items-center gap-2 font-black hover:text-white uppercase tracking-tighter text-sm"
+                type="button"
+                onClick={(e) => {
+                  onCategorySelect(category.id);
+                  e.currentTarget.blur();
+                }}
+                className={`header-category-btn text-muted px-4 py-3 transition-all whitespace-nowrap flex items-center gap-2 font-black uppercase tracking-tighter text-sm ${activeCategoryId === category.id ? 'is-active' : ''}`}
               >
                 <span>{language === 'ar' ? category.name : category.name_en}</span>
               </button>

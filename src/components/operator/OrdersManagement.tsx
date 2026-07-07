@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, forwardRef, useImperativeHandle, useCallback, useMemo } from 'react';
 import { supabase, Order, OrderItem, Customer, CustomerNote } from '../../lib/supabase';
 import { useRealtimeSubscription } from '../../hooks/useRealtimeSubscription';
-import { Clock, Package, Truck, CheckCircle, XCircle, AlertTriangle, StickyNote, User, Phone, MapPin, Archive, Edit2, X, Navigation, TicketPercent, List, MessageSquare, ShoppingCart } from 'lucide-react';
+import { Clock, Package, Truck, CheckCircle, XCircle, AlertTriangle, StickyNote, User, Phone, MapPin, Archive, Edit2, X, Navigation, TicketPercent, List, MessageSquare, ShoppingCart, ChevronRight, ChevronUp, Check, Search, ArrowRight, ArrowLeft, Calendar, Hash } from 'lucide-react';
 import MapView from '../MapView';
+import { useOperatorPreferences } from '../../contexts/OperatorPreferencesContext';
 
 interface OrderWithDetails extends Order {
   items: OrderItem[];
@@ -77,14 +78,30 @@ export type OrdersManagementHandle = {
   revealOrder: (orderId: string, kind: 'live' | 'archive') => void;
 };
 
-const OrdersManagement = forwardRef<OrdersManagementHandle, {}>(function OrdersManagement(_props, ref) {
-  const language = 'ar';
+type OrdersManagementProps = {
+  mode?: 'full' | 'live-only' | 'archive-only';
+};
+
+const OrdersManagement = forwardRef<OrdersManagementHandle, OrdersManagementProps>(function OrdersManagement({ mode = 'full' }, ref) {
+  const { language } = useOperatorPreferences();
   const [activeOrders, setActiveOrders] = useState<OrderWithDetails[]>([]);
   const [completedOrders, setCompletedOrders] = useState<OrderWithDetails[]>([]);
   const [archiveOrders, setArchiveOrders] = useState<ArchiveOrderWithDetails[]>([]);
   const [showCompleted, setShowCompleted] = useState(false);
-  const [showArchive, setShowArchive] = useState(false);
+  const [showArchive, setShowArchive] = useState(mode === 'archive-only');
+
+  useEffect(() => {
+    if (mode === 'archive-only') {
+      setShowArchive(true);
+      setShowCompleted(false);
+    } else if (mode === 'live-only') {
+      setShowArchive(false);
+      setShowCompleted(false);
+    }
+  }, [mode]);
+
   const [selectedOrder, setSelectedOrder] = useState<OrderWithDetails | null>(null);
+  const [statusMenuOpenOrderId, setStatusMenuOpenOrderId] = useState<string | null>(null);
   const [selectedArchiveOrder, setSelectedArchiveOrder] = useState<ArchiveOrderWithDetails | null>(null);
   const [noteText, setNoteText] = useState('');
   const [operatorNotePublic, setOperatorNotePublic] = useState(true);
@@ -101,6 +118,7 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, {}>(function OrdersM
   const [showMap, setShowMap] = useState(false);
   const [mapLocation, setMapLocation] = useState<{ latitude: number; longitude: number; name?: string; address?: string } | null>(null);
   const [searchDate, setSearchDate] = useState('');
+  const [searchMode, setSearchMode] = useState<'name' | 'phone' | 'orderNumber' | 'address' | 'date' | null>(null);
   const [pickupNowMs, setPickupNowMs] = useState(() => Date.now());
   const [expandedArchiveGroups, setExpandedArchiveGroups] = useState<Set<string>>(new Set());
   const [pendingArchiveRevealOrderId, setPendingArchiveRevealOrderId] = useState<string | null>(null);
@@ -528,6 +546,11 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, {}>(function OrdersM
       return { key: group.key, title, archivedAt: group.archivedAt, orders: group.orders };
     });
   }, [archiveOrders]);
+
+  useEffect(() => {
+    if (mode !== 'archive-only' || archiveGroups.length === 0) return;
+    setExpandedArchiveGroups(new Set(archiveGroups.map((g) => g.key)));
+  }, [mode, archiveGroups]);
 
   const clockNotificationOrders = useMemo(() => {
     return activeOrders.filter(
@@ -2169,70 +2192,81 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, {}>(function OrdersM
             )}
 
             <div className="flex flex-wrap gap-2">
-              {order.delivery_method === 'pickup' ? (
-                <>
-                  {(order.status === 'under_review' || order.status === 'preparing') && (
-                    <button
-                      onClick={() => updateOrderStatus(order.id, order.status === 'under_review' ? 'preparing' : 'arrived')}
-                      disabled={updatingStatusOrderId === order.id}
-                      className="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-2 rounded-lg transition-colors font-bold"
-                    >
-                      {order.status === 'under_review' ? 'قيد التحضير' : 'تم التحضير'}
-                    </button>
-                  )}
-                  {order.status === 'arrived' && (
-                    <button
-                      onClick={() => updateOrderStatus(order.id, 'completed')}
-                      disabled={updatingStatusOrderId === order.id}
-                      className="flex-1 bg-green-600 hover:bg-green-500 text-white py-2 rounded-lg transition-colors font-bold"
-                    >
-                      تم التسليم والدفع
-                    </button>
-                  )}
-                </>
-              ) : (
-                <>
-                  {order.status === 'under_review' && (
-                    <button
-                      onClick={() => updateOrderStatus(order.id, 'preparing')}
-                      disabled={updatingStatusOrderId === order.id}
-                      className="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-2 rounded-lg transition-colors font-bold"
-                    >
-                      قيد التحضير
-                    </button>
-                  )}
+              {/* STATUS CHANGE UI */}
+              {(() => {
+                let nextStatus = '';
+                let nextLabel = '';
+                let bgClass = 'bg-blue-600 hover:bg-blue-500';
+                let isLastStatus = order.delivery_method === 'pickup' 
+                  ? order.status === 'arrived' 
+                  : order.status === 'on_way';
+                let availableStatuses = [];
 
-                  {order.status === 'preparing' && (
-                    <button
-                      onClick={() => updateOrderStatus(order.id, 'on_way')}
-                      disabled={updatingStatusOrderId === order.id}
-                      className="flex-1 bg-purple-600 hover:bg-purple-500 text-white py-2 rounded-lg transition-colors font-bold"
-                    >
-                      في الطريق
-                    </button>
-                  )}
+                if (order.delivery_method === 'pickup') {
+                  availableStatuses = [
+                    { status: 'under_review', label: 'قيد المراجعة' },
+                    { status: 'preparing', label: 'قيد التحضير' },
+                    { status: 'arrived', label: 'تم التحضير' },
+                    { status: 'completed', label: 'تم التسليم والدفع' }
+                  ];
+                  if (order.status === 'under_review') { nextStatus = 'preparing'; nextLabel = 'قيد التحضير'; }
+                  else if (order.status === 'preparing') { nextStatus = 'arrived'; nextLabel = 'تم التحضير'; }
+                  else if (order.status === 'arrived') { nextStatus = 'completed'; nextLabel = 'تم التسليم والدفع'; bgClass = 'bg-green-600 hover:bg-green-500'; }
+                } else {
+                  availableStatuses = [
+                    { status: 'under_review', label: 'قيد المراجعة' },
+                    { status: 'preparing', label: 'قيد التحضير' },
+                    { status: 'on_way', label: 'في الطريق' },
+                    { status: 'completed', label: 'تم التسليم والدفع' }
+                  ];
+                  if (order.status === 'under_review') { nextStatus = 'preparing'; nextLabel = 'قيد التحضير'; }
+                  else if (order.status === 'preparing') { nextStatus = 'on_way'; nextLabel = 'في الطريق'; bgClass = 'bg-purple-600 hover:bg-purple-500'; }
+                  else if (order.status === 'on_way') { nextStatus = 'completed'; nextLabel = 'تم التسليم والدفع'; bgClass = 'bg-green-600 hover:bg-green-500'; }
+                }
 
-                  {order.status === 'on_way' && (
-                    <button
-                      onClick={() => updateOrderStatus(order.id, 'arrived')}
-                      disabled={updatingStatusOrderId === order.id}
-                      className="flex-1 bg-orange-600 hover:bg-orange-500 text-white py-2 rounded-lg transition-colors font-bold"
-                    >
-                      وصل الآن
-                    </button>
-                  )}
+                if (!nextStatus || order.status === 'completed' || order.status === 'cancelled' || order.status === 'rejected') return null;
 
-                  {order.status === 'arrived' && (
+                return (
+                  <div className="flex-1 flex relative">
                     <button
-                      onClick={() => updateOrderStatus(order.id, 'completed')}
+                      onClick={() => updateOrderStatus(order.id, nextStatus as any)}
                       disabled={updatingStatusOrderId === order.id}
-                      className="flex-1 bg-green-600 hover:bg-green-500 text-white py-2 rounded-lg transition-colors font-bold"
+                      className={`flex-1 ${bgClass} text-white py-2 rounded-r-lg transition-colors font-bold flex items-center justify-center`}
                     >
-                      تم التسليم والدفع
+                      {isLastStatus ? <Check className="w-5 h-5 ml-2" /> : <ChevronRight className="w-5 h-5 ml-2" />}
+                      <span>{nextLabel}</span>
                     </button>
-                  )}
-                </>
-              )}
+                    <button
+                      onClick={() => setStatusMenuOpenOrderId(statusMenuOpenOrderId === order.id ? null : order.id)}
+                      disabled={updatingStatusOrderId === order.id}
+                      className={`px-3 ${bgClass} text-white py-2 rounded-l-lg transition-colors flex items-center justify-center border-r border-white/20`}
+                    >
+                      <ChevronUp className="w-5 h-5" />
+                    </button>
+                    
+                    {statusMenuOpenOrderId === order.id && (
+                      <div className="absolute bottom-full left-0 right-0 mb-2 bg-gray-800 rounded-lg p-2 flex flex-col gap-1 z-10 border border-gray-600 shadow-xl">
+                        {availableStatuses.map(s => (
+                          <button
+                            key={s.status}
+                            onClick={() => {
+                              updateOrderStatus(order.id, s.status as any);
+                              setStatusMenuOpenOrderId(null);
+                            }}
+                            className={`py-2 px-3 rounded text-right transition-colors ${
+                              order.status === s.status 
+                                ? 'bg-blue-500/20 text-blue-300 font-bold' 
+                                : 'text-gray-300 hover:bg-gray-700'
+                            }`}
+                          >
+                            {s.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               {order.status !== 'cancelled' && (
                 <button
@@ -2635,109 +2669,121 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, {}>(function OrdersM
 
   return (
     <div className="space-y-6">
-      <div className="bg-gray-900/50 border-2 border-purple-500/30 rounded-xl p-4">
-        <div className="flex justify-between items-center mb-4">
-          <h2 className="text-xl font-bold text-white text-right">
-            إدارة الطلبات
-          </h2>
-        </div>
-
-        <div className="grid grid-cols-5 gap-3">
-          {/* الاسم */}
-          <div className="relative">
-            <input
-              type="text"
-              value={searchName}
-              onChange={(e) => setSearchName(e.target.value)}
-              placeholder={language === 'ar' ? 'الاسم' : 'Name'}
-              className={`w-full bg-gray-800 border-2 border-purple-500/50 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-purple-400 ${language === 'ar' ? 'text-right' : 'text-left'}`}
-              dir={language === 'ar' ? 'rtl' : 'ltr'}
-            />
-          </div>
-
-          {/* الهاتف */}
-          <div className="relative">
-            <input
-              type="text"
-              value={searchPhone}
-              onChange={(e) => setSearchPhone(e.target.value)}
-              placeholder={language === 'ar' ? 'الهاتف' : 'Phone'}
-              className={`w-full bg-gray-800 border-2 border-purple-500/50 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-purple-400 ${language === 'ar' ? 'text-right' : 'text-left'}`}
-              dir={language === 'ar' ? 'rtl' : 'ltr'}
-            />
-          </div>
-
-          {/* البون */}
-          <div className="relative">
-            <input
-              type="text"
-              value={searchOrderNumber}
-              onChange={(e) => setSearchOrderNumber(e.target.value)}
-              placeholder={language === 'ar' ? 'البون' : 'Order #'}
-              className={`w-full bg-gray-800 border-2 border-purple-500/50 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-purple-400 ${language === 'ar' ? 'text-right' : 'text-left'}`}
-              dir={language === 'ar' ? 'rtl' : 'ltr'}
-            />
-          </div>
-
-          {/* العنوان */}
-          <div className="relative">
-            <input
-              type="text"
-              value={searchAddress}
-              onChange={(e) => setSearchAddress(e.target.value)}
-              placeholder={language === 'ar' ? 'العنوان' : 'Address'}
-              className={`w-full bg-gray-800 border-2 border-purple-500/50 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-purple-400 ${language === 'ar' ? 'text-right' : 'text-left'}`}
-              dir={language === 'ar' ? 'rtl' : 'ltr'}
-            />
-          </div>
-
-          {/* التاريخ */}
-          <div className="relative">
-            <input
-              ref={datePickerRef}
-              type="date"
-              value={searchDate}
-              onChange={(e) => setSearchDate(e.target.value)}
-              className="sr-only"
-              aria-hidden="true"
-              tabIndex={-1}
-            />
-            <button
-              type="button"
-              onClick={() => {
-                const picker = datePickerRef.current;
-                if (!picker) return;
-                // Chrome/Edge support showPicker(); fallback to click for other browsers.
-                if (typeof (picker as any).showPicker === 'function') (picker as any).showPicker();
-                else picker.click();
-              }}
-              className="w-full bg-gray-800 border-2 border-purple-500/50 rounded-lg px-4 py-2 text-white text-right focus:outline-none focus:border-purple-400"
-            >
-              {formatDateLabel(searchDate)}
-            </button>
+      {searchMode === null ? (
+        <div className="flex items-end gap-1" dir="rtl">
+          <div className="flex flex-col gap-1">
+            <span className="text-xs text-purple-300 font-bold">{language === 'ar' ? 'خيارات البحث' : 'Search Options'}</span>
+            <div className="w-[200px] max-h-[52px] overflow-y-auto" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(139,92,246,0.4) rgba(31,27,46,0.5)' }}>
+              <div className="flex flex-col gap-2" dir={language === 'ar' ? 'rtl' : 'ltr'}>
+                <button onClick={() => setSearchMode('name')} className="whitespace-nowrap flex items-center gap-2 bg-gray-800 hover:bg-purple-900/50 border-2 border-purple-500/30 hover:border-purple-400/70 rounded-lg px-4 py-3 text-white transition-all w-full">
+                  <User className="w-5 h-5 text-purple-400 shrink-0" />
+                  <span className="font-bold text-sm">{language === 'ar' ? 'الاسم' : 'Name'}</span>
+                </button>
+                <button onClick={() => setSearchMode('phone')} className="whitespace-nowrap flex items-center gap-2 bg-gray-800 hover:bg-purple-900/50 border-2 border-purple-500/30 hover:border-purple-400/70 rounded-lg px-4 py-3 text-white transition-all w-full">
+                  <Phone className="w-5 h-5 text-purple-400 shrink-0" />
+                  <span className="font-bold text-sm">{language === 'ar' ? 'الهاتف' : 'Phone'}</span>
+                </button>
+                <button onClick={() => setSearchMode('orderNumber')} className="whitespace-nowrap flex items-center gap-2 bg-gray-800 hover:bg-purple-900/50 border-2 border-purple-500/30 hover:border-purple-400/70 rounded-lg px-4 py-3 text-white transition-all w-full">
+                  <Hash className="w-5 h-5 text-purple-400 shrink-0" />
+                  <span className="font-bold text-sm">{language === 'ar' ? 'البون' : 'Receipt'}</span>
+                </button>
+                <button onClick={() => setSearchMode('address')} className="whitespace-nowrap flex items-center gap-2 bg-gray-800 hover:bg-purple-900/50 border-2 border-purple-500/30 hover:border-purple-400/70 rounded-lg px-4 py-3 text-white transition-all w-full">
+                  <MapPin className="w-5 h-5 text-purple-400 shrink-0" />
+                  <span className="font-bold text-sm">{language === 'ar' ? 'العنوان' : 'Address'}</span>
+                </button>
+                <button onClick={() => setSearchMode('date')} className="whitespace-nowrap flex items-center gap-2 bg-gray-800 hover:bg-purple-900/50 border-2 border-purple-500/30 hover:border-purple-400/70 rounded-lg px-4 py-3 text-white transition-all w-full">
+                  <Calendar className="w-5 h-5 text-purple-400 shrink-0" />
+                  <span className="font-bold text-sm">{language === 'ar' ? 'التاريخ' : 'Date'}</span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
-
-        {/* Clear button */}
-        {(searchName || searchPhone || searchOrderNumber || searchAddress || searchDate) && (
-          <div className="mt-3 flex justify-end">
-            <button
-              onClick={() => {
-                setSearchName('');
-                setSearchPhone('');
-                setSearchOrderNumber('');
-                setSearchAddress('');
-                setSearchDate('');
-              }}
-              className="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg transition-colors font-bold text-sm"
-            >
-              إلغاء البحث
-            </button>
+      ) : (
+        <div className="flex gap-3 items-center" dir={language === 'ar' ? 'rtl' : 'ltr'}>
+          <button
+            onClick={() => {
+              setSearchMode(null);
+              setSearchName('');
+              setSearchPhone('');
+              setSearchOrderNumber('');
+              setSearchAddress('');
+              setSearchDate('');
+            }}
+            className="p-3 bg-gray-800 hover:bg-gray-700 rounded-lg text-white border-2 border-purple-500/30 transition-colors shrink-0 flex items-center justify-center"
+          >
+            {language === 'ar' ? <ArrowRight className="w-5 h-5" /> : <ArrowLeft className="w-5 h-5" />}
+          </button>
+          <div className="relative flex-1">
+            <div className="absolute top-1/2 -translate-y-1/2 right-4 text-purple-400">
+              {searchMode === 'name' && <User className="w-5 h-5" />}
+              {searchMode === 'phone' && <Phone className="w-5 h-5" />}
+              {searchMode === 'orderNumber' && <Hash className="w-5 h-5" />}
+              {searchMode === 'address' && <MapPin className="w-5 h-5" />}
+              {searchMode === 'date' && <Calendar className="w-5 h-5" />}
+            </div>
+            
+            {searchMode === 'date' ? (
+              <>
+                <input
+                  ref={datePickerRef}
+                  type="date"
+                  value={searchDate}
+                  onChange={(e) => setSearchDate(e.target.value)}
+                  className="sr-only"
+                  aria-hidden="true"
+                  tabIndex={-1}
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    const picker = datePickerRef.current;
+                    if (!picker) return;
+                    if (typeof (picker as any).showPicker === 'function') (picker as any).showPicker();
+                    else picker.click();
+                  }}
+                  className={`w-full bg-gray-800 border-2 border-purple-500/50 rounded-lg pr-12 pl-4 py-3 text-white text-right focus:outline-none focus:border-purple-400 font-bold shadow-inner`}
+                >
+                  {formatDateLabel(searchDate) || (language === 'ar' ? 'اختر التاريخ' : 'Select Date')}
+                </button>
+              </>
+            ) : (
+              <input
+                type="text"
+                value={
+                  searchMode === 'name' ? searchName :
+                  searchMode === 'phone' ? searchPhone :
+                  searchMode === 'orderNumber' ? searchOrderNumber :
+                  searchAddress
+                }
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (searchMode === 'name') setSearchName(val);
+                  else if (searchMode === 'phone') setSearchPhone(val);
+                  else if (searchMode === 'orderNumber') setSearchOrderNumber(val);
+                  else if (searchMode === 'address') setSearchAddress(val);
+                }}
+                autoFocus
+                placeholder={
+                  language === 'ar' ? 
+                    (searchMode === 'name' ? 'اكتب الاسم...' :
+                     searchMode === 'phone' ? 'اكتب رقم الهاتف...' :
+                     searchMode === 'orderNumber' ? 'اكتب رقم البون...' :
+                     'اكتب العنوان...') :
+                    (searchMode === 'name' ? 'Enter Name...' :
+                     searchMode === 'phone' ? 'Enter Phone...' :
+                     searchMode === 'orderNumber' ? 'Enter Receipt Number...' :
+                     'Enter Address...')
+                }
+                className={`w-full bg-gray-800 border-2 border-purple-500/50 rounded-lg pr-12 pl-4 py-3 text-white focus:outline-none focus:border-purple-400 font-bold shadow-inner ${language === 'ar' ? 'text-right' : 'text-left'}`}
+                dir={language === 'ar' ? 'rtl' : 'ltr'}
+              />
+            )}
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
-      <div className="flex items-center justify-between">
+      <div className={`flex items-center justify-between ${mode === 'archive-only' ? 'hidden' : ''}`}>
         <div className="flex gap-2">
           <button
             onClick={() => {
@@ -2749,7 +2795,7 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, {}>(function OrdersM
               : 'bg-gray-700 text-purple-300 hover:bg-gray-600'
               }`}
           >
-            الطلبات الحالية ({activeOrders.length})
+            {language === 'ar' ? `الطلبات الحالية (${activeOrders.length})` : `Current (${activeOrders.length})`}
           </button>
           <button
             onClick={() => {
@@ -2761,8 +2807,9 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, {}>(function OrdersM
               : 'bg-gray-700 text-purple-300 hover:bg-gray-600'
               }`}
           >
-            الطلبات السابقة ({completedOrders.length})
+            {language === 'ar' ? `الطلبات السابقة (${completedOrders.length})` : `Previous (${completedOrders.length})`}
           </button>
+          {mode === 'full' && (
           <button
             onClick={() => {
               setShowCompleted(false);
@@ -2780,11 +2827,12 @@ const OrdersManagement = forwardRef<OrdersManagementHandle, {}>(function OrdersM
               }`}
           >
             <Archive className="w-5 h-5" />
-            الأرشيف ({archiveOrders.length})
+            {language === 'ar' ? `الأرشيف (${archiveOrders.length})` : `Archive (${archiveOrders.length})`}
           </button>
+          )}
         </div>
 
-        {/* Top Aggregated Notifications Widgets */}
+        {/* Top Aggregated Notifications Widgets — live orders only */}
         <div className="flex items-center gap-3 relative flex-wrap px-1 py-1" ref={dropdownRef}>
           {/* Clock Notifications */}
           <div className="relative shrink-0">

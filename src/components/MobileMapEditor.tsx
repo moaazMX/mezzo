@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { MapPin, Search, X, Navigation, ChevronRight, Plus, Minus } from 'lucide-react';
+import { MapPin, Search, X, Navigation, ChevronRight, ChevronLeft, Plus, Minus } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import InteractiveMap from './InteractiveMap';
 import { DeliveryZone, DeliveryService } from '../lib/supabase';
@@ -150,13 +150,12 @@ export default function MobileMapEditor({
         <div className="flex items-center gap-3 bg-surface/95 backdrop-blur-xl px-4 h-16 shrink-0 border-b border-white/5">
           <button
             onClick={() => {
-              setIsSearching(false);
-              setSearchQuery('');
-              setSearchResults([]);
+              if (searchQuery) setSearchQuery('');
+              else setIsSearching(false);
             }}
-            className="w-10 h-10 flex items-center justify-center rounded-full bg-white/5 text-white active:scale-95 transition-all"
+            className="h-9 w-9 flex items-center justify-center rounded-full bg-white/10 text-white shadow-sm backdrop-blur-sm transition-colors hover:bg-white/20 focus:outline-none shrink-0"
           >
-            <ChevronRight className="w-6 h-6" />
+            {language === 'ar' ? <ChevronRight className="h-5 w-5" /> : <ChevronLeft className="h-5 w-5" />}
           </button>
 
           <div className="flex-1 relative">

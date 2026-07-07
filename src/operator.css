@@ -1,0 +1,114 @@
+/* Operator panel — independent light/dark theme (does not affect customer site) */
+.operator-dark {
+  --op-bg: #0f0a18;
+  --op-sidebar-bg: #130e1f;
+  --op-surface: #1a1228;
+  --op-border: rgba(139, 92, 246, 0.22);
+  --op-text: #f8fafc;
+  --op-muted: #94a3b8;
+  --op-accent: #a855f7;
+  --op-accent-hover: #9333ea;
+}
+
+.operator-light {
+  --op-bg: #f1f5f9;
+  --op-sidebar-bg: #ffffff;
+  --op-surface: #ffffff;
+  --op-border: rgba(15, 23, 42, 0.1);
+  --op-text: #0f172a;
+  --op-muted: #64748b;
+  --op-accent: #7c3aed;
+  --op-accent-hover: #6d28d9;
+}
+
+.op-shell {
+  background: var(--op-bg);
+  color: var(--op-text);
+  min-height: 100dvh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.op-sidebar {
+  height: 100%;
+  min-height: 100%;
+  overflow: hidden;
+}
+
+.op-sidebar .op-nav-btn {
+  color: var(--op-muted);
+}
+.op-sidebar .op-nav-btn:hover {
+  background: color-mix(in srgb, var(--op-accent) 12%, transparent);
+  color: var(--op-text);
+}
+.op-sidebar .op-nav-btn-active {
+  background: color-mix(in srgb, var(--op-accent) 18%, transparent);
+  color: var(--op-accent);
+}
+
+.op-panel {
+  background: var(--op-surface);
+  border: 1px solid var(--op-border);
+  border-radius: 0.75rem;
+  padding: 1.25rem;
+}
+
+.op-input {
+  background: var(--op-bg);
+  border: 1px solid var(--op-border);
+  border-radius: 0.5rem;
+  padding: 0.625rem 0.875rem;
+  color: var(--op-text);
+  font-size: 0.875rem;
+}
+
+.op-btn-primary {
+  background: var(--op-accent);
+  color: #fff;
+  border-radius: 0.5rem;
+  font-weight: 700;
+  transition: background 0.15s;
+}
+.op-btn-primary:hover:not(:disabled) {
+  background: var(--op-accent-hover);
+}
+.op-btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.op-btn-secondary {
+  background: color-mix(in srgb, var(--op-accent) 10%, var(--op-surface));
+  border: 1px solid var(--op-border);
+  color: var(--op-text);
+  border-radius: 0.5rem;
+  font-weight: 600;
+}
+
+.op-main-header {
+  background: var(--op-surface);
+  border-bottom: 1px solid var(--op-border);
+}
+
+/* Keep operator panels readable in light mode */
+.operator-light .bg-gray-900\/50,
+.operator-light .bg-gray-950\/40 {
+  background: rgba(15, 23, 42, 0.04) !important;
+}
+.operator-light .text-white {
+  color: var(--op-text) !important;
+}
+.operator-light .text-gray-300,
+.operator-light .text-gray-400 {
+  color: var(--op-muted) !important;
+}
+
+/* Delivery zone preview — read-only, no map controls */
+.delivery-zone-preview-map .leaflet-control-container,
+.delivery-zone-preview-map .leaflet-control-attribution {
+  display: none !important;
+}
+.delivery-zone-preview-map .leaflet-container {
+  background: #e2e8f0;
+}

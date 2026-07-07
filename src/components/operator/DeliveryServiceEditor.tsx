@@ -20,7 +20,7 @@ import ScrubNumberInput from './ScrubNumberInput';
 import icon from 'leaflet/dist/images/marker-icon.png';
 import iconShadow from 'leaflet/dist/images/marker-shadow.png';
 
-let DefaultIcon = L.icon({
+const DefaultIcon = L.icon({
   iconUrl: icon,
   shadowUrl: iconShadow,
   iconSize: [25, 41],
@@ -271,7 +271,7 @@ export default function DeliveryServiceEditor({
   const [hoveredLayerId, setHoveredLayerId] = useState<string | null>(null);
   const [dragDidOccur, setDragDidOccur] = useState(false);
   const [mouseDownLayer, setMouseDownLayer] = useState<{ layerId: string; startPos: L.LatLng; points: PolygonPoint[] } | null>(null);
-  const [updatedLayerPrices, setUpdatedLayerPrices] = useState<Map<string, number>>(new Map());
+  const [updatedLayerPrices, setUpdatedLayerPrices] = useState<Map<string, number | string>>(new Map());
   const [updatedLayerNames, setUpdatedLayerNames] = useState<Map<string, string>>(new Map());
   const [isSaving, setIsSaving] = useState(false);
   const [editingBlockerZone, setEditingBlockerZone] = useState<EditingBlockerZone | null>(null);
@@ -299,8 +299,6 @@ export default function DeliveryServiceEditor({
     (z) => z.is_active === false && !deletedBlockerZoneIds.has(z.id)
   );
 
-  const getBlockerTransformId = (blocker: EditingBlockerZone | null) =>
-    blocker?.id ? `blocker:${blocker.id}` : 'blocker:new';
 
   const getLayerScale = (transformId: string) => layerScalePercent.get(transformId) ?? 100;
   const getLayerRotate = (transformId: string) => layerRotateDegrees.get(transformId) ?? 0;
@@ -379,7 +377,7 @@ export default function DeliveryServiceEditor({
   };
 
   const handleBlockerTransformChange = (transformId: string, scale: number, rotate: number) => {
-    if (!layerTransformBase.has(transformId) && editingBlockerZone?.points.length >= 3) {
+    if (!layerTransformBase.has(transformId) && editingBlockerZone?.points && editingBlockerZone.points.length >= 3) {
       syncTransformBase(transformId, editingBlockerZone.points);
     }
     setLayerScalePercent((prev) => new Map(prev).set(transformId, scale));
@@ -559,6 +557,7 @@ export default function DeliveryServiceEditor({
           : { lat: mapCenter[0], lng: mapCenter[1] });
       setMapCenter([center.lat, center.lng]);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [services]);
 
   // Clear editing state when the edited service is deleted
@@ -593,6 +592,7 @@ export default function DeliveryServiceEditor({
     if (matchedLayer) {
       setEditingLayer(prev => prev ? { ...prev, id: matchedLayer.id } : prev);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [services]);
 
   // Clear movedOtherLayers only when explicitly needed (e.g. closing editor)
@@ -633,8 +633,8 @@ export default function DeliveryServiceEditor({
         if (deletedLayerIds.has(layerId)) continue;
         const pts = getPointsForLayer(layerId, layer.polygon_points || []);
         if (pts.length >= 3 && isPointInPolygon(point, pts)) {
-          const price =
-            updatedLayerPrices.get(layerId) ?? Number(layer.delivery_price || 0);
+          const rawPrice = updatedLayerPrices.get(layerId);
+          const price = rawPrice !== undefined ? Number(rawPrice) : Number(layer.delivery_price || 0);
           const name =
             updatedLayerNames.get(layerId) ?? layer.name ?? `طبقة ${layer.order_index}`;
           found = { name, price, x, y: y + 72 };
@@ -711,6 +711,7 @@ export default function DeliveryServiceEditor({
     setEditingService((prev) =>
       prev && !prev.branch_location ? { ...prev, branch_location: center } : prev
     );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isCreatingNewService, editingLayer?.points, editingLayer?.id]);
 
   const onMapClick = (latlng: { lat: number, lng: number }) => {
@@ -1039,7 +1040,7 @@ export default function DeliveryServiceEditor({
             const updatedPrice = updatedLayerPrices.get(id) ?? originalLayer.delivery_price;
             const updatedName = updatedLayerNames.get(id) ?? originalLayer.name ?? null;
             await onLayerUpdate(id, {
-              delivery_price: updatedPrice,
+              delivery_price: updatedPrice === '' || updatedPrice === undefined ? undefined : Number(updatedPrice),
               polygon_points: points,
               name: updatedName ?? undefined
             });
@@ -1056,7 +1057,7 @@ export default function DeliveryServiceEditor({
               const updatedName = updatedLayerNames.get(editingLayer.id) ?? originalLayer.name ?? null;
               await onLayerUpdate(editingLayer.id, {
                 polygon_points: editingLayer.points,
-                delivery_price: editingLayer.delivery_price,
+                delivery_price: (editingLayer.delivery_price as any) === '' || editingLayer.delivery_price === undefined ? undefined : Number(editingLayer.delivery_price),
                 name: updatedName ?? undefined
               });
             }
@@ -1073,7 +1074,7 @@ export default function DeliveryServiceEditor({
             const nameOverride = updatedLayerNames.get(id);
             if (priceOverride === undefined && nameOverride === undefined) continue;
 
-            const newPrice = priceOverride ?? layer.delivery_price;
+            const newPrice = priceOverride !== undefined ? Number(priceOverride) : layer.delivery_price;
             const newName = nameOverride ?? layer.name ?? null;
 
             if (newPrice !== layer.delivery_price || newName !== layer.name) {
@@ -1129,7 +1130,7 @@ export default function DeliveryServiceEditor({
           is_active: editingService.is_active,
           initialLayer: undefined,
           initialLayers: allLayers.length > 0 ? allLayers : undefined
-        } as any);
+        } as unknown as Parameters<typeof onServiceCreate>[0]);
       }
 
       // Clear all temporary states
@@ -1497,7 +1498,7 @@ export default function DeliveryServiceEditor({
                             setIsDraggingBlocker(true);
                             setBlockerDragDidMove(false);
                             setBlockerDragStart(e.latlng);
-                            L.DomEvent.stopPropagation(e as any);
+                            L.DomEvent.stopPropagation(e as unknown as Event);
                           }
                         }
                       }}
@@ -2174,7 +2175,7 @@ export default function DeliveryServiceEditor({
                       editingLayer.id === 'initial-layer' &&
                       editingLayer.points.length >= 1 &&
                       !stagedLayers.some(l => getLayerId(l) === 'initial-layer')
-                      ? [editingLayer as any]
+                      ? [editingLayer as unknown as DeliveryZoneLayer]
                       : [])
                   ]
                     .sort((a, b) => (a.order_index || 0) - (b.order_index || 0))
@@ -2277,8 +2278,9 @@ export default function DeliveryServiceEditor({
                                   type="number"
                                   value={displayPrice}
                                   onChange={(e) => {
-                                    const val = parseFloat(e.target.value) || 0;
-                                    if (isStaged) {
+                                    const valStr = e.target.value;
+                                    const val = valStr === '' ? '' : parseFloat(valStr) || 0;
+                                    if (isStaged && typeof val === 'number') {
                                       setStagedLayers((prev) =>
                                         prev.map((l) =>
                                           getLayerId(l) === layerId ? { ...l, delivery_price: val } : l
@@ -2290,97 +2292,99 @@ export default function DeliveryServiceEditor({
                                       map.set(layerId, val);
                                       return map;
                                     });
-                                    setEditingLayer((prev) => {
-                                      if (prev && getLayerId(prev) === layerId) {
-                                        return { ...prev, delivery_price: val };
-                                      }
-                                      return {
-                                        id:
-                                          isStaged || layerId === 'initial-layer'
-                                            ? layerId
-                                            : (layer as DeliveryZoneLayer).id,
-                                        serviceId: editingService.id,
-                                        points,
-                                        delivery_price: val,
-                                        order_index: layer.order_index,
-                                        name: existingName ?? null
-                                      };
-                                    });
+                                    if (typeof val === 'number') {
+                                      setEditingLayer((prev) => {
+                                        if (prev && getLayerId(prev) === layerId) {
+                                          return { ...prev, delivery_price: val };
+                                        }
+                                        return {
+                                          id:
+                                            isStaged || layerId === 'initial-layer'
+                                              ? layerId
+                                              : (layer as DeliveryZoneLayer).id,
+                                          serviceId: editingService.id,
+                                          points,
+                                          delivery_price: val,
+                                          order_index: layer.order_index,
+                                          name: existingName ?? null
+                                        };
+                                      });
+                                    }
                                   }}
                                   className="w-full bg-black border border-yellow-500/50 rounded text-center text-white text-xs py-1"
                                 />
                               </div>
                               <p className="text-[10px] text-gray-500 text-right">{points.length} نقاط</p>
 
-                          {isLayerActive && canEditPoints && points.length >= 3 && (
-                            <div className="grid grid-cols-2 gap-2 mt-2 pt-2 border-t border-yellow-500/20">
-                              <div className="flex flex-col items-end gap-0.5">
-                                <span className="text-[10px] text-gray-400">التكبير %</span>
-                                <ScrubNumberInput
-                                  value={getLayerScale(layerId)}
-                                  onChange={(val) =>
-                                    handleLayerTransformChange(layerId, val, getLayerRotate(layerId))
-                                  }
-                                  min={10}
-                                  max={300}
-                                  step={1}
-                                  decimals={0}
-                                  suffix="%"
-                                  className="w-full bg-black border border-yellow-500/50 rounded text-center text-white text-xs py-1"
-                                />
-                              </div>
-                              <div className="flex flex-col items-end gap-0.5">
-                                <span className="text-[10px] text-gray-400">التدوير °</span>
-                                <ScrubNumberInput
-                                  value={getLayerRotate(layerId)}
-                                  onChange={(val) =>
-                                    handleLayerTransformChange(layerId, getLayerScale(layerId), val)
-                                  }
-                                  min={-360}
-                                  max={360}
-                                  step={1}
-                                  decimals={0}
-                                  suffix="°"
-                                  className="w-full bg-black border border-yellow-500/50 rounded text-center text-white text-xs py-1"
-                                />
-                              </div>
-                            </div>
-                          )}
+                              {isLayerActive && canEditPoints && points.length >= 3 && (
+                                <div className="grid grid-cols-2 gap-2 mt-2 pt-2 border-t border-yellow-500/20">
+                                  <div className="flex flex-col items-end gap-0.5">
+                                    <span className="text-[10px] text-gray-400">التكبير %</span>
+                                    <ScrubNumberInput
+                                      value={getLayerScale(layerId)}
+                                      onChange={(val) =>
+                                        handleLayerTransformChange(layerId, val, getLayerRotate(layerId))
+                                      }
+                                      min={10}
+                                      max={300}
+                                      step={1}
+                                      decimals={0}
+                                      suffix="%"
+                                      className="w-full bg-black border border-yellow-500/50 rounded text-center text-white text-xs py-1"
+                                    />
+                                  </div>
+                                  <div className="flex flex-col items-end gap-0.5">
+                                    <span className="text-[10px] text-gray-400">التدوير °</span>
+                                    <ScrubNumberInput
+                                      value={getLayerRotate(layerId)}
+                                      onChange={(val) =>
+                                        handleLayerTransformChange(layerId, getLayerScale(layerId), val)
+                                      }
+                                      min={-360}
+                                      max={360}
+                                      step={1}
+                                      decimals={0}
+                                      suffix="°"
+                                      className="w-full bg-black border border-yellow-500/50 rounded text-center text-white text-xs py-1"
+                                    />
+                                  </div>
+                                </div>
+                              )}
 
-                          {/* Pin removal buttons for the active layer */}
-                          {isLayerActive && canEditPoints && points.length > 0 && (
-                            <div className="mt-2 pt-2 border-t border-yellow-500/20">
-                              <p className="text-[10px] text-yellow-300 mb-1 text-right">إزالة نقاط معينة:</p>
-                              <div className="flex flex-wrap gap-1 justify-end">
-                                {[...points]
-                                  .sort((a, b) => (a.label ?? 0) - (b.label ?? 0))
-                                  .map((p, i) => {
-                                    const label = p.label ?? (i + 1);
-                                    return (
-                                      <button
-                                        key={`${label}-${i}`}
-                                        onMouseEnter={() => setHoveredPointLabel({ layerId, label })}
-                                        onMouseLeave={() => setHoveredPointLabel(null)}
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          const newPoints = removePolygonPointByLabel(points, label);
-                                          setEditingLayer({ ...editingLayer, points: newPoints });
+                              {/* Pin removal buttons for the active layer */}
+                              {isLayerActive && canEditPoints && points.length > 0 && (
+                                <div className="mt-2 pt-2 border-t border-yellow-500/20">
+                                  <p className="text-[10px] text-yellow-300 mb-1 text-right">إزالة نقاط معينة:</p>
+                                  <div className="flex flex-wrap gap-1 justify-end">
+                                    {[...points]
+                                      .sort((a, b) => (a.label ?? 0) - (b.label ?? 0))
+                                      .map((p, i) => {
+                                        const label = p.label ?? (i + 1);
+                                        return (
+                                          <button
+                                            key={`${label}-${i}`}
+                                            onMouseEnter={() => setHoveredPointLabel({ layerId, label })}
+                                            onMouseLeave={() => setHoveredPointLabel(null)}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              const newPoints = removePolygonPointByLabel(points, label);
+                                              setEditingLayer({ ...editingLayer, points: newPoints });
 
-                                          if (layerId.startsWith('unpinned-')) {
-                                            setStagedLayers(prev => prev.map(l => getLayerId(l) === layerId ? { ...l, points: newPoints } : l));
-                                          } else {
-                                            setMovedOtherLayers(prev => new Map(prev).set(layerId, newPoints));
-                                          }
-                                        }}
-                                        className={`bg-gray-900 border px-1.5 py-0.5 rounded text-[10px] transition-all ${hoveredPointLabel?.layerId === layerId && hoveredPointLabel.label === label ? 'border-red-500 text-red-500 scale-110 shadow-lg shadow-red-900/50' : 'border-yellow-600/30 text-yellow-100 hover:border-red-500 hover:text-red-400'}`}
-                                      >
-                                        {label}
-                                      </button>
-                                    );
-                                  })}
-                              </div>
-                            </div>
-                          )}
+                                              if (layerId.startsWith('unpinned-')) {
+                                                setStagedLayers(prev => prev.map(l => getLayerId(l) === layerId ? { ...l, points: newPoints } : l));
+                                              } else {
+                                                setMovedOtherLayers(prev => new Map(prev).set(layerId, newPoints));
+                                              }
+                                            }}
+                                            className={`bg-gray-900 border px-1.5 py-0.5 rounded text-[10px] transition-all ${hoveredPointLabel?.layerId === layerId && hoveredPointLabel.label === label ? 'border-red-500 text-red-500 scale-110 shadow-lg shadow-red-900/50' : 'border-yellow-600/30 text-yellow-100 hover:border-red-500 hover:text-red-400'}`}
+                                          >
+                                            {label}
+                                          </button>
+                                        );
+                                      })}
+                                  </div>
+                                </div>
+                              )}
                             </div>
                           )}
                         </div>

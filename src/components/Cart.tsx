@@ -1,4 +1,4 @@
-import { ChevronRight, Minus, Package, Plus, ShoppingBag, Trash2, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Minus, Package, Plus, ShoppingBag, Trash2, X } from 'lucide-react';
 import { Item } from '../lib/supabase';
 import { useLanguage } from '../contexts/LanguageContext';
 import { ReactNode, useEffect, useRef, useCallback, useState } from 'react';
@@ -475,14 +475,13 @@ export default function Cart({
                 <button
                   type="button"
                   data-no-drag="1"
-                  aria-label={language === 'ar' ? 'رجوع' : 'Back'}
-                  className="absolute right-3 top-0 bottom-0 my-auto z-10 flex h-9 w-9 pointer-events-auto items-center justify-center rounded-lg border border-white/20 bg-black/35 text-white shadow-sm backdrop-blur-sm transition-colors hover:bg-black/45 focus:outline-none active:bg-black/35"
+                  className={`absolute ${language === 'ar' ? 'right-3' : 'left-3'} top-0 bottom-0 my-auto z-10 h-9 w-9 flex items-center justify-center rounded-full bg-white/10 text-white shadow-sm backdrop-blur-sm transition-colors hover:bg-white/20 focus:outline-none pointer-events-auto`}
                   onClick={(e) => {
                     e.stopPropagation();
                     onCheckoutHandleBack?.();
                   }}
                 >
-                  <ChevronRight className="h-5 w-5" strokeWidth={2.25} />
+                  {language === 'ar' ? <ChevronRight className="h-5 w-5" /> : <ChevronLeft className="h-5 w-5" />}
                 </button>
               )}
               <div className="handle-summary flex w-full items-center justify-between pointer-events-none">
@@ -809,6 +808,9 @@ export default function Cart({
           flex-direction: column;
           position: relative;
         }
+        .light .cart-sheet-inner {
+          box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.08), 0 -1px 0 rgba(0, 0, 0, 0.1) !important;
+        }
 
         .cart-sheet.cart-sheet--phone-chrome {
           width: 100vw;
@@ -924,6 +926,10 @@ export default function Cart({
           background: rgba(30,25,55,0.6);
           border: 1px solid rgba(124,58,237,0.15);
           border-radius: 14px;
+        }
+        .light .cart-item-card {
+          background: rgba(0, 0, 0, 0.03) !important;
+          border-color: rgba(0, 0, 0, 0.08) !important;
         }
 
         .sheet-footer {

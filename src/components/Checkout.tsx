@@ -1,6 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
-import { MapPin, Navigation, X, ChevronRight, ShoppingBag, CreditCard, Banknote, User, Phone, Building, StickyNote, AlertTriangle, Lock, Plus, Pencil, Home, Briefcase, Clock } from 'lucide-react';
+import { MapPin, Navigation, X, ChevronRight, ChevronLeft, ShoppingBag, CreditCard, Banknote, User, Phone, Building, StickyNote, AlertTriangle, Lock, Plus, Pencil, Home, Briefcase, Clock } from 'lucide-react';
 import MobileMapEditor from './MobileMapEditor';
 import { supabase, DeviceCoupon, DeliveryService, DeliveryZoneLayer, Item, DeliveryZone, PolygonPoint, CustomerData, AddressType, SavedAddressTab } from '../lib/supabase';
 import { generateEasyRecoveryCode, hashPhonePassword, hashRecoveryCode } from '../lib/phonePassword';
@@ -89,6 +89,8 @@ function allocateUniqueSavedAddressLabel(rawLabel: string, savedTabs: SavedAddre
   return candidate;
 }
 
+let checkoutSessionCache: any = null;
+
 export default function Checkout({
   isOpen,
   onClose,
@@ -105,18 +107,18 @@ export default function Checkout({
 }: CheckoutProps) {
   const { language, t } = useLanguage();
   const currencySymbol = language === 'ar' ? 'ج' : 'EG';
-  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'instant_transfer'>('cash');
+  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'instant_transfer'>(() => checkoutSessionCache?.paymentMethod ?? 'cash');
   const [instantNumber, setInstantNumber] = useState('');
-  const [orderNote, setOrderNote] = useState('');
+  const [orderNote, setOrderNote] = useState(() => checkoutSessionCache?.orderNote ?? '');
   const [gpsLoading, setGpsLoading] = useState(false);
   const [gpsError, setGpsError] = useState<string | null>(null);
   const [isEditingLocation, setIsEditingLocation] = useState(false);
   const [selectedCouponId, setSelectedCouponId] = useState<string | null>(null);
-  const [deliveryMethod, setDeliveryMethod] = useState<'delivery' | 'pickup'>('delivery');
+  const [deliveryMethod, setDeliveryMethod] = useState<'delivery' | 'pickup'>(() => checkoutSessionCache?.deliveryMethod ?? 'delivery');
   const [deliveryServices, setDeliveryServices] = useState<DeliveryService[]>([]);
   const [deliveryFee, setDeliveryFee] = useState<number>(0);
   const [isInDeliveryZone, setIsInDeliveryZone] = useState<boolean | null>(null);
-  const [customerData, setCustomerData] = useState<CustomerData>({
+  const [customerData, setCustomerData] = useState<CustomerData>(() => checkoutSessionCache?.customerData ?? {
     name: '',
     phone: '',
     address_type: 'apartment',
@@ -130,12 +132,12 @@ export default function Checkout({
     company_name: '',
     landmark: ''
   });
-  const [activeAddressType, setActiveAddressType] = useState<AddressType>('apartment');
+  const [activeAddressType, setActiveAddressType] = useState<AddressType>(() => checkoutSessionCache?.activeAddressType ?? 'apartment');
   const [savedAddressTabs, setSavedAddressTabs] = useState<SavedAddressTab[]>([]);
   const [newAddressName, setNewAddressName] = useState('');
   const [pendingAddressType, setPendingAddressType] = useState<'apartment' | 'house' | 'workplace' | null>(null);
   const [isCreatingCustomAddress, setIsCreatingCustomAddress] = useState(false);
-  const [checkoutStep, setCheckoutStep] = useState<'customer' | 'address'>('customer');
+  const [checkoutStep, setCheckoutStep] = useState<'customer' | 'address'>(() => checkoutSessionCache?.checkoutStep ?? 'customer');
   const [showDebugMap, setShowDebugMap] = useState(false);
   const [allZones, setAllZones] = useState<DeliveryZone[]>([]);
   const [selectedServiceInfo, setSelectedServiceInfo] = useState<{
@@ -162,24 +164,59 @@ export default function Checkout({
   const [resetNewRecovery, setResetNewRecovery] = useState<string | null>(null);
   const [phoneLengthError, setPhoneLengthError] = useState<string | null>(null);
   const [secondaryPhoneLengthError, setSecondaryPhoneLengthError] = useState<string | null>(null);
-  const [pickupCommitmentAccepted, setPickupCommitmentAccepted] = useState(false);
-  const [pickupSlot, setPickupSlot] = useState<'now' | 'hour' | 'custom' | null>('hour');
+  const [pickupCommitmentAccepted, setPickupCommitmentAccepted] = useState(() => checkoutSessionCache?.pickupCommitmentAccepted ?? false);
+  const [pickupSlot, setPickupSlot] = useState<'now' | 'hour' | 'custom' | null>(() => checkoutSessionCache?.pickupSlot ?? 'hour');
   const [pickupCustomPickerOpen, setPickupCustomPickerOpen] = useState(false);
-  const [pickupPreset, setPickupPreset] = useState<'now' | 'hour' | 'twohours' | 'custom'>('now');
+  const [pickupPreset, setPickupPreset] = useState<'now' | 'hour' | 'twohours' | 'custom'>(() => checkoutSessionCache?.pickupPreset ?? 'now');
   const [pickupCustomHour, setPickupCustomHour] = useState(() => {
+    if (checkoutSessionCache?.pickupCustomHour !== undefined) return checkoutSessionCache.pickupCustomHour;
     const dt = new Date(Date.now() + 60 * 60 * 1000);
     let h = dt.getHours() % 12;
     return h === 0 ? 12 : h;
   });
   const [pickupCustomMinute, setPickupCustomMinute] = useState(() => {
+    if (checkoutSessionCache?.pickupCustomMinute !== undefined) return checkoutSessionCache.pickupCustomMinute;
     const dt = new Date(Date.now() + 60 * 60 * 1000);
     return Math.round(dt.getMinutes() / 5) * 5 % 60;
   });
   const [pickupCustomAmPm, setPickupCustomAmPm] = useState<'AM' | 'PM'>(() => {
+    if (checkoutSessionCache?.pickupCustomAmPm !== undefined) return checkoutSessionCache.pickupCustomAmPm;
     const dt = new Date(Date.now() + 60 * 60 * 1000);
     return dt.getHours() >= 12 ? 'PM' : 'AM';
   });
-  const [pickupCustomConfirmedLabel, setPickupCustomConfirmedLabel] = useState<string | null>(null);
+  const [pickupCustomConfirmedLabel, setPickupCustomConfirmedLabel] = useState<string | null>(() => checkoutSessionCache?.pickupCustomConfirmedLabel ?? null);
+
+  useEffect(() => {
+    checkoutSessionCache = {
+      paymentMethod,
+      orderNote,
+      deliveryMethod,
+      customerData,
+      activeAddressType,
+      checkoutStep,
+      pickupSlot,
+      pickupPreset,
+      pickupCustomHour,
+      pickupCustomMinute,
+      pickupCustomAmPm,
+      pickupCustomConfirmedLabel,
+      pickupCommitmentAccepted
+    };
+  }, [
+    paymentMethod,
+    orderNote,
+    deliveryMethod,
+    customerData,
+    activeAddressType,
+    checkoutStep,
+    pickupSlot,
+    pickupPreset,
+    pickupCustomHour,
+    pickupCustomMinute,
+    pickupCustomAmPm,
+    pickupCustomConfirmedLabel,
+    pickupCommitmentAccepted
+  ]);
   const [pickupSheetDragY, setPickupSheetDragY] = useState(0);
   const [mobileSavedTabSheet, setMobileSavedTabSheet] = useState<SavedAddressTab | null>(null);
   const [renameSavedTarget, setRenameSavedTarget] = useState<SavedAddressTab | null>(null);
@@ -1493,9 +1530,9 @@ export default function Checkout({
               {activeStep === 'address' && (
                 <button
                   onClick={() => setActiveStep('customer')}
-                  className="text-white hover:text-purple-300 text-sm font-bold"
+                  className="h-9 w-9 flex items-center justify-center rounded-full bg-white/10 text-white shadow-sm backdrop-blur-sm transition-colors hover:bg-white/20 focus:outline-none shrink-0"
                 >
-                  {language === 'ar' ? 'رجوع' : 'Back'}
+                  {language === 'ar' ? <ChevronRight className="h-5 w-5" /> : <ChevronLeft className="h-5 w-5" />}
                 </button>
               )}
               {activeStep === 'customer' && <div className="w-10"></div>}

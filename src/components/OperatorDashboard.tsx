@@ -1,21 +1,56 @@
 import { useState, useEffect, useRef } from 'react';
-import { LogOut, Package, ShoppingBag, BarChart3, Settings, List } from 'lucide-react';
+import { LogOut } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { OperatorPreferencesProvider, useOperatorPreferences } from '../contexts/OperatorPreferencesContext';
 import { RealtimeProvider } from '../contexts/RealtimeContext';
 import RealtimeIndicator from './RealtimeIndicator';
+import OperatorSidebar from './operator/OperatorSidebar';
 import OrdersManagement, { OrdersManagementHandle } from './operator/OrdersManagement';
 import ItemsManagement from './operator/ItemsManagement';
 import Analytics from './operator/Analytics';
 import SettingsPanel from './operator/SettingsPanel';
+import ContentDisplaySettings from './operator/ContentDisplaySettings';
+import PaymentMethodsPanel from './operator/PaymentMethodsPanel';
+import SiteInterfacePanel from './operator/SiteInterfacePanel';
+import DeliveryLayersOverview from './operator/DeliveryLayersOverview';
+import ArchiveCustomerPanel from './operator/ArchiveCustomerPanel';
+import { navLabel, readStoredOperatorNav, storeOperatorNav, type OperatorNavId } from './operator/operatorNav';
+import { supabase } from '../lib/supabase';
+import '../operator.css';
 
-type Tab = 'orders' | 'items' | 'analytics' | 'settings';
-
-export default function OperatorDashboard() {
+function OperatorDashboardInner() {
   const { logout } = useAuth();
-  const ordersRef = useRef<OrdersManagementHandle>(null);
-  const [activeTab, setActiveTab] = useState<Tab>('settings');
+  const { language, theme, t } = useOperatorPreferences();
+  const liveOrdersRef = useRef<OrdersManagementHandle>(null);
+  const archiveOrdersRef = useRef<OrdersManagementHandle>(null);
+  const [keepArchiveOrdersMounted, setKeepArchiveOrdersMounted] = useState(() => {
+    const nav = readStoredOperatorNav();
+    return nav.startsWith('archive.');
+  });
+  const [activeNav, setActiveNav] = useState<OperatorNavId>(() => readStoredOperatorNav());
   const [focusCustomerPhone, setFocusCustomerPhone] = useState<string | null>(null);
   const [focusCustomerNonce, setFocusCustomerNonce] = useState(0);
+  const [customerDeletePassword, setCustomerDeletePassword] = useState('2007');
+  const [showDeliveryEditor, setShowDeliveryEditor] = useState(false);
+
+  useEffect(() => {
+    storeOperatorNav(activeNav);
+    if (activeNav.startsWith('archive.')) {
+      setKeepArchiveOrdersMounted(true);
+    }
+  }, [activeNav]);
+
+  const navigateTo = (id: OperatorNavId) => {
+    if (id.startsWith('archive.')) setKeepArchiveOrdersMounted(true);
+    setActiveNav(id);
+  };
+
+  useEffect(() => {
+    void supabase.from('settings').select('value').eq('key', 'customer_delete_password').maybeSingle().then(({ data }) => {
+      const val = data?.value?.trim();
+      if (val) setCustomerDeletePassword(val);
+    });
+  }, []);
 
   useEffect(() => {
     const onFocusCustomer = (evt: Event) => {
@@ -24,91 +59,130 @@ export default function OperatorDashboard() {
       if (!phone) return;
       setFocusCustomerPhone(phone);
       setFocusCustomerNonce((n) => n + 1);
-      setActiveTab('settings');
+      navigateTo('archive.customers');
       window.setTimeout(() => setFocusCustomerPhone(null), 1200);
     };
     window.addEventListener('operator-focus-customer', onFocusCustomer as EventListener);
-    return () => {
-      window.removeEventListener('operator-focus-customer', onFocusCustomer as EventListener);
-    };
+    return () => window.removeEventListener('operator-focus-customer', onFocusCustomer as EventListener);
   }, []);
 
   const goToOrder = (orderId: string, kind: 'live' | 'archive') => {
-    setActiveTab('orders');
+    if (kind === 'archive') setKeepArchiveOrdersMounted(true);
+    navigateTo(kind === 'archive' ? 'archive.orders' : 'orders');
     window.setTimeout(() => {
-      ordersRef.current?.revealOrder(orderId, kind);
+      const ref = kind === 'archive' ? archiveOrdersRef : liveOrdersRef;
+      ref.current?.revealOrder(orderId, kind);
     }, 80);
   };
 
-  const tabs = [
-    { id: 'orders' as Tab, label: 'الطلبات', icon: Package },
-    { id: 'items' as Tab, label: 'الأصناف', icon: ShoppingBag },
-    { id: 'analytics' as Tab, label: 'الإحصائيات', icon: BarChart3 },
-    { id: 'settings' as Tab, label: 'الإعدادات', icon: Settings }
-  ];
+  const renderOtherContent = () => {
+    switch (activeNav) {
+      case 'orders':
+      case 'archive.orders':
+        return null;
+      case 'archive.customers':
+        return (
+          <ArchiveCustomerPanel
+            onNavigateToOrder={goToOrder}
+            onNavigateToCustomerOrders={(phone) => {
+              setKeepArchiveOrdersMounted(true);
+              navigateTo('archive.orders');
+              window.setTimeout(() => archiveOrdersRef.current?.focusCustomerByPhone(phone), 80);
+            }}
+            focusCustomerPhone={focusCustomerPhone}
+            focusCustomerToken={focusCustomerNonce}
+            customerDeletePassword={customerDeletePassword}
+          />
+        );
+      case 'content.items':
+        return <ItemsManagement />;
+      case 'content.settings':
+        return <ContentDisplaySettings />;
+      case 'analytics':
+        return <Analytics />;
+      case 'coupons':
+        return <SettingsPanel section="coupons" hideTitle />;
+      case 'delivery':
+        return (
+          <div className="space-y-4">
+            <DeliveryLayersOverview />
+            <button
+              type="button"
+              onClick={() => setShowDeliveryEditor(true)}
+              className="op-btn-secondary px-4 py-2 text-sm font-bold"
+            >
+              {t('فتح محرر خدمات التوصيل', 'Open delivery services editor')}
+            </button>
+            {showDeliveryEditor && (
+              <div className="op-panel">
+                <SettingsPanel section="delivery" hideTitle />
+              </div>
+            )}
+          </div>
+        );
+      case 'payment':
+        return <PaymentMethodsPanel />;
+      case 'site-interface':
+        return <SiteInterfacePanel />;
+      case 'security':
+        return <SettingsPanel section="security" hideTitle />;
+      case 'support.end-day':
+        return <SettingsPanel section="end-day" hideTitle />;
+      case 'support.site-data':
+        return <SettingsPanel section="slot-data" hideTitle />;
+      case 'support.reset':
+        return <SettingsPanel section="reset" hideTitle />;
+      default:
+        return null;
+    }
+  };
 
   return (
-    <RealtimeProvider>
-    <div className="min-h-screen bg-dark">
-      <header className="bg-dark/80 backdrop-blur-sm border-b-2 border-primary sticky top-0 z-40 shadow-xl">
-        <div className="container mx-auto px-4 py-4">
-          <div className="flex items-center justify-between gap-4">
+    <div className={`op-shell flex h-[100dvh] min-h-[100dvh] ${theme === 'light' ? 'operator-light' : 'operator-dark'}`}>
+      <OperatorSidebar active={activeNav} onNavigate={navigateTo} />
+
+      <div className="flex min-w-0 flex-1 flex-col">
+        <header className="op-main-header flex items-center justify-between gap-4 px-5 py-3">
+          <h2 className="text-lg font-black text-[var(--op-text)]">
+            {navLabel(activeNav, language)}
+          </h2>
+          <div className="flex items-center gap-3">
+            <RealtimeIndicator label={t('مباشر', 'Live')} className="shrink-0" />
             <button
+              type="button"
               onClick={logout}
-              className="bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded-lg transition-colors flex items-center gap-2 font-bold shrink-0"
+              className="flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-red-500"
             >
-              <LogOut className="w-5 h-5" />
-              <span>خروج</span>
+              <LogOut className="h-4 w-4" />
+              {t('خروج', 'Logout')}
             </button>
-
-            <h1 className="text-2xl sm:text-3xl font-black text-white flex items-center gap-2">
-              <List className="w-8 h-8 shrink-0" />
-              لوحة التحكم
-            </h1>
-
-            <RealtimeIndicator label="مباشر" className="shrink-0" />
           </div>
-        </div>
-      </header>
+        </header>
 
-      <div className="container mx-auto px-4 py-6">
-        <div className="bg-dark/50 rounded-xl border-2 border-primary/50 p-2 mb-6 flex gap-2">
-          {tabs.map(tab => {
-            const Icon = tab.icon;
-            return (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className={`flex-1 py-3 px-4 rounded-lg transition-all flex items-center justify-center gap-2 font-bold ${activeTab === tab.id
-                  ? 'bg-primary text-white shadow-lg'
-                  : 'bg-gray-700/50 text-muted hover:bg-gray-700'
-                  }`}
-              >
-                <Icon className="w-5 h-5" />
-                <span>{tab.label}</span>
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="bg-dark/30 rounded-xl border-2 border-primary/30 p-6">
-          {activeTab === 'orders' && <OrdersManagement ref={ordersRef} />}
-          {activeTab === 'items' && <ItemsManagement />}
-          {activeTab === 'analytics' && <Analytics />}
-          {activeTab === 'settings' && (
-            <SettingsPanel
-              focusCustomerPhone={focusCustomerPhone}
-              focusCustomerToken={focusCustomerNonce}
-              onNavigateToCustomerOrders={(phone) => {
-                setActiveTab('orders');
-                window.setTimeout(() => ordersRef.current?.focusCustomerByPhone(phone), 80);
-              }}
-              onNavigateToOrder={(orderId, kind) => goToOrder(orderId, kind)}
-            />
-          )}
-        </div>
+        <main className="flex-1 overflow-y-auto p-5">
+          <div className="mx-auto max-w-6xl">
+            <div className={activeNav === 'orders' ? 'block' : 'hidden'} aria-hidden={activeNav !== 'orders'}>
+              <OrdersManagement ref={liveOrdersRef} mode="live-only" />
+            </div>
+            {keepArchiveOrdersMounted && (
+              <div className={activeNav === 'archive.orders' ? 'block' : 'hidden'} aria-hidden={activeNav !== 'archive.orders'}>
+                <OrdersManagement ref={archiveOrdersRef} mode="archive-only" />
+              </div>
+            )}
+            {renderOtherContent()}
+          </div>
+        </main>
       </div>
     </div>
-    </RealtimeProvider>
+  );
+}
+
+export default function OperatorDashboard() {
+  return (
+    <OperatorPreferencesProvider>
+      <RealtimeProvider>
+        <OperatorDashboardInner />
+      </RealtimeProvider>
+    </OperatorPreferencesProvider>
   );
 }

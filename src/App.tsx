@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { LanguageProvider, useLanguage } from './contexts/LanguageContext';
 import { ThemeProvider } from './contexts/ThemeContext';
+import { MenuDisplayProvider } from './contexts/MenuDisplayContext';
 import { supabase, Category, Item, DeviceCoupon, DeliveryService, DeliveryZoneLayer, PolygonPoint, Order, OrderItem, CustomerData } from './lib/supabase';
 import { fetchDeliveryZonesAndServices, getDeliveryMatch } from './lib/deliveryMatch';
 import { generateEasyRecoveryCode, hashPhonePassword, hashRecoveryCode } from './lib/phonePassword';
@@ -28,7 +29,7 @@ import { isTouchPhoneChrome } from './lib/viewportUi';
 import { formatDeadline } from './lib/dateUtils';
 import { RealtimeProvider } from './contexts/RealtimeContext';
 import { useRealtimeRefetch } from './hooks/useRealtimeSubscription';
-import RealtimeIndicator from './components/RealtimeIndicator';
+import { formatOrderItemsList, buildCatalogLookup } from './lib/itemDisplayName';
 
 function OperatorPage() {
   const { isOperator } = useAuth();
@@ -64,6 +65,7 @@ function AppContent() {
   const [items, setItems] = useState<Item[]>([]);
   const [cartItems, setCartItems] = useState<CartItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [activeCategoryId, setActiveCategoryId] = useState<string | null>(null);
   const hasLoadedMenuRef = useRef(false);
   const [showCart, setShowCart] = useState(false);
   const [showCheckout, setShowCheckout] = useState(false);
@@ -1368,11 +1370,22 @@ function AppContent() {
 
 
   const handleCategoryClick = (categoryId: string) => {
+    setActiveCategoryId(categoryId);
     const element = document.getElementById(`category-${categoryId}`);
     if (element) {
       element.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   };
+
+  useEffect(() => {
+    const onScroll = () => {
+      if (window.scrollY < 80) {
+        setActiveCategoryId(null);
+      }
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
 
   const handleSavePostOrderPassword = async () => {
     if (!orderSuccess?.setupCustomerId || !orderSuccess?.setupPhone) return;
@@ -1448,6 +1461,8 @@ function AppContent() {
     .map(x => x.item)
     .slice(0, Math.min(6, Math.max(2, cartItems.length + 1)));
 
+  const catalogLookup = buildCatalogLookup(items);
+
   return (
     <div className="min-h-screen bg-dark">
       <CheatCodeInput
@@ -1469,12 +1484,13 @@ function AppContent() {
         hasOrders={ordersCount > 0}
         ordersCount={ordersCount}
         categories={categories}
+        activeCategoryId={activeCategoryId}
         onCategorySelect={handleCategoryClick}
       />
 
       {/* Pending Orders Banner */}
       {pendingOrders.length > 0 && (
-        <div className="bg-gradient-to-r from-primary/20 via-surface to-primary/20 border-b border-primary/30 relative overflow-hidden">
+        <div className="pending-orders-banner bg-gradient-to-r from-primary/20 via-surface to-primary/20 border-b border-primary/30 relative overflow-hidden">
           <div className="container mx-auto px-4 py-1.5">
             <div className="flex items-center gap-3">
               {/* Left Arrow with count */}
@@ -1522,38 +1538,63 @@ function AppContent() {
                               #{order.order_number}
                             </span>
                             <div className="flex items-center gap-2">
-                            <div className={`px-2 py-0.5 rounded-full border flex items-center gap-1.5 ${statusInfo.bg} ${statusInfo.border} ${statusInfo.color}`}>
+                              <div className={`px-2 py-0.5 rounded-full border flex items-center gap-1.5 ${statusInfo.bg} ${statusInfo.border} ${statusInfo.color}`}>
                                 <span className="font-bold text-[10px] whitespace-nowrap">{statusInfo.text}</span>
                                 <StatusIcon className="w-3.5 h-3.5" />
                               </div>
                               {(() => {
                                 const timer = getPickupCountdownMeta(order);
-                                if (!timer) return null;
+                                if (!timer || !timer.deadlineRaw) return null;
+                                const diff = new Date(timer.deadlineRaw).getTime() - pickupNowMs;
+                                let remLabel = '';
+                                if (diff <= 0) {
+                                  remLabel = language === 'ar' ? 'انتهى الوقت' : 'Time up';
+                                } else {
+                                  const totalMins = Math.floor(diff / 60000);
+                                  const totalHours = Math.floor(totalMins / 60);
+                                  if (language === 'ar') {
+                                    if (totalHours >= 1) {
+                                      if (totalHours === 1) remLabel = 'متبقي ساعة';
+                                      else if (totalHours === 2) remLabel = 'متبقي ساعتان';
+                                      else remLabel = `متبقي ${totalHours} ساعات`;
+                                    } else {
+                                      if (totalMins <= 0) remLabel = 'انتهى الوقت';
+                                      else if (totalMins === 1) remLabel = 'متبقي دقيقة';
+                                      else if (totalMins === 2) remLabel = 'متبقي دقيقتان';
+                                      else remLabel = `متبقي ${totalMins} دقيقة`;
+                                    }
+                                  } else {
+                                    if (totalHours >= 1) {
+                                      remLabel = totalHours === 1 ? '1 hr left' : `${totalHours} hrs left`;
+                                    } else {
+                                      if (totalMins <= 0) remLabel = 'Time up';
+                                      else if (totalMins === 1) remLabel = '1 min left';
+                                      else remLabel = `${totalMins} mins left`;
+                                    }
+                                  }
+                                }
                                 return (
-                                  <span className={`text-[11px] font-black ${timer.className} ${language === 'ar' ? 'w-16 text-left' : 'w-12 text-right'} inline-block`}>
-                                    {timer.text}
+                                  <span className={`text-[11px] font-black whitespace-nowrap ${timer.className}`}>
+                                    {remLabel}
                                   </span>
                                 );
                               })()}
                             </div>
                           </div>
 
-                          <div className="h-3 flex items-center">
+                          <div className="min-h-[1rem] flex items-center">
                             {(() => {
                               const timer = getPickupCountdownMeta(order);
                               const formattedDeadline = timer?.deadlineRaw ? formatDeadline(timer.deadlineRaw as string, language) : '';
                               if (!formattedDeadline) return null;
                               return (
-                                <p className="text-[9px] text-muted font-bold leading-none flex items-center gap-1">
-                                  {/* Updated label removed as per user request */}
-                                  {formattedDeadline}
-                                </p>
+                                <p className="text-[9px] text-muted font-bold leading-none">{formattedDeadline}</p>
                               );
                             })()}
                           </div>
 
                           <p className="text-muted text-[10px] truncate leading-tight">
-                            {order.items.map(i => i.item_name).join('، ')}
+                            {formatOrderItemsList(order.items, language, catalogLookup)}
                           </p>
                         </div>
                       </div>
@@ -1809,6 +1850,7 @@ function AppContent() {
         onClose={() => {
           setShowProfile(false);
           setHighlightOrderId(null);
+          setActiveBottomTab('home');
         }}
         customerPhone={customerPhone}
         highlightOrderId={highlightOrderId}
@@ -1819,6 +1861,7 @@ function AppContent() {
         }}
         onSettingsViewChange={setProfileSettingsView}
         onStartOrderEdit={handleStartOrderEdit}
+        catalogItems={items}
       />
 
       {phoneChrome && (
@@ -1995,11 +2038,13 @@ function App() {
   return (
     <ThemeProvider>
       <LanguageProvider>
+        <MenuDisplayProvider>
         <AuthProvider>
           <RealtimeProvider>
             <AppContent />
           </RealtimeProvider>
         </AuthProvider>
+        </MenuDisplayProvider>
       </LanguageProvider>
     </ThemeProvider>
   );

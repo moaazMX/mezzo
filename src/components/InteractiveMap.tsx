@@ -4,6 +4,7 @@ import { MapContainer, TileLayer, Polygon, useMap, useMapEvents } from 'react-le
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import { useLanguage } from '../contexts/LanguageContext';
+import { useTheme } from '../contexts/ThemeContext';
 import { DeliveryZone, DeliveryService } from '../lib/supabase';
 
 // Fix Leaflet icon issue
@@ -133,6 +134,7 @@ export default function InteractiveMap({
   hideFixedMarker = false
 }: InteractiveMapProps) {
   const { language } = useLanguage();
+  const { theme } = useTheme();
   const [mapCenter, setMapCenter] = useState<[number, number]>([latitude, longitude]);
   const [zoomLevel, setZoomLevel] = useState(zoom ?? 15);
   const [searchQuery, setSearchQuery] = useState('');
@@ -317,7 +319,7 @@ export default function InteractiveMap({
           <MapContainer
             center={[latitude, longitude]}
             zoom={16}
-            className="interactive-map-dark w-full h-full rounded-lg overflow-hidden bg-gray-800 pointer-events-none"
+            className={`${theme === 'dark' ? 'interactive-map-dark bg-gray-800' : 'bg-gray-100'} w-full h-full rounded-lg overflow-hidden pointer-events-none`}
             zoomControl={false}
             attributionControl={false}
             dragging={false}
@@ -350,7 +352,7 @@ export default function InteractiveMap({
       <MapContainer
         center={mapCenter}
         zoom={zoomLevel}
-        className="w-full h-full rounded-lg overflow-hidden bg-gray-800 interactive-map-dark"
+        className={`w-full h-full rounded-lg overflow-hidden ${theme === 'dark' ? 'interactive-map-dark bg-gray-800' : 'bg-gray-100'}`}
         zoomControl={false}
         attributionControl={false}
       >

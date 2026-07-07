@@ -13,10 +13,12 @@
 
 .light {
   --color-primary: 262 62% 56%;
-  /* Off-white page + surfaces (not pure white — easier on the eyes) */
-  --color-dark: 220 16% 92%;
-  --color-surface: 220 14% 97%;
-  --color-muted: 220 18% 30%;
+  --color-dark: 210 20% 98%;
+  /* Very light grey for main bg */
+  --color-surface: 0 0% 100%;
+  /* Pure white for cards/menus */
+  --color-muted: 215 16% 47%;
+  /* Gray-500 */
 }
 
 html {
@@ -33,33 +35,97 @@ body {
   color: #111827 !important;
 }
 
-.light .text-muted {
+.light .text-gray-200,
+.light .text-white\/90,
+.light .text-white\/80 {
+  color: #1f2937 !important;
+}
+
+.light .text-gray-300,
+.light .text-white\/70,
+.light .text-white\/60 {
   color: #374151 !important;
 }
 
+.light .text-gray-400,
+.light .text-white\/50,
+.light .text-white\/45,
+.light .text-white\/40 {
+  color: #4b5563 !important;
+}
+
+/* Handle bar */
+.light .handle-bar {
+  background: rgba(0, 0, 0, 0.2) !important;
+}
+
+/* Invert translucent backgrounds so they look good on light backgrounds */
+.light .bg-white\/5,
+.light .bg-white\/10,
+.light .bg-white\/15 {
+  background-color: rgba(0, 0, 0, 0.08) !important;
+}
+
+.light .bg-white\/20 {
+  background-color: rgba(0, 0, 0, 0.22) !important;
+  /* Made darker for dots visibility */
+}
+
+.light .bg-black\/20,
+.light .bg-black\/25,
+.light .bg-black\/30 {
+  background-color: rgba(0, 0, 0, 0.04) !important;
+}
+
+.light .bg-black\/35,
+.light .bg-black\/40,
+.light .bg-black\/50,
+.light .bg-black\/60,
 .light .bg-black\/80,
 .light .bg-black\/85,
-.light .bg-black\/60 {
-  background-color: rgba(17, 24, 39, 0.55) !important;
+.light .bg-black\/90,
+.light .bg-black\/95 {
+  background-color: rgba(255, 255, 255, 0.9) !important;
+  color: #111827 !important;
 }
 
 .light .bg-dark\/50,
 .light .bg-dark\/60,
-.light .bg-dark\/80 {
-  background-color: rgba(228, 231, 236, 0.92) !important;
+.light .bg-dark\/80,
+.light .bg-dark\/90,
+.light .bg-gray-900 {
+  background-color: rgba(248, 250, 252, 0.92) !important;
 }
 
-/* Food menu: 4 columns on desktop / fine pointer; 2 columns on touch phones only */
+/* Borders */
+.light .border-white\/5,
+.light .border-white\/10,
+.light .border-white\/12,
+.light .border-white\/15,
+.light .border-white\/20,
+.light .border-primary\/25,
+.light .border-primary\/35 {
+  border-color: rgba(0, 0, 0, 0.08) !important;
+}
+
+.light .border-muted\/20,
+.light .border-muted\/30 {
+  border-color: rgba(0, 0, 0, 0.15) !important;
+}
+
+/* Food menu layout rules */
 .mx-menu-grid {
   display: grid;
   gap: 0.875rem;
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
+
 @media (max-width: 768px) and (pointer: coarse) {
   .mx-menu-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
 @media (min-width: 769px) {
   .mx-menu-grid {
     gap: 1.5rem;
@@ -71,13 +137,14 @@ body {
   contain-intrinsic-size: auto 480px;
 }
 
-/* Desktop-style item cards: full-bleed image + bottom overlay (not on touch phones) */
-@media not all and (max-width: 768px) and (pointer: coarse) {
+/* Desktop-only overlay card: phones always keep the white title bar below the image */
+@media (hover: hover) and (pointer: fine) and (min-width: 769px) {
   .mx-menu-item .mx-menu-item-btn {
     position: relative;
     display: block;
     min-height: 15.5rem;
   }
+
   .mx-menu-item .mx-menu-hero {
     position: absolute;
     inset: 0;
@@ -85,25 +152,158 @@ body {
     min-height: 100%;
     width: 100%;
   }
+
   .mx-menu-item .mx-menu-meta {
     position: absolute;
     inset-inline: 0;
     bottom: 0;
     border-top-width: 0;
-    background: linear-gradient(
-      to top,
-      rgba(8, 4, 18, 0.97) 0%,
-      rgba(8, 4, 18, 0.78) 40%,
-      rgba(8, 4, 18, 0.28) 72%,
-      transparent 100%
-    );
+    background: linear-gradient(to top,
+        rgba(8, 4, 18, 0.82) 0%,
+        rgba(8, 4, 18, 0.52) 38%,
+        rgba(8, 4, 18, 0.14) 68%,
+        transparent 100%);
     padding-top: 2.25rem;
   }
 }
 
-/* Keep light text on intentional dark photo surfaces (menu cards, item modal) */
-.light .dark-surface-ignore-theme .text-white {
+/* Force white text on desktop hover cards since they retain the dark gradient */
+@media (hover: hover) and (pointer: fine) {
+  .light .mx-menu-item .desktop-force-white {
+    color: #f8fafc !important;
+  }
+
+  .light .mx-menu-item .desktop-force-white-muted {
+    color: #cbd5e1 !important;
+  }
+}
+
+/* Category nav + profile settings — card style in both themes */
+.header-category-btn {
+  border-radius: 8px;
+  border: 1px solid hsl(var(--color-muted) / 0.22);
+  border-bottom-width: 4px !important;
+  border-bottom-color: hsl(var(--color-primary) / 0.35) !important;
+}
+
+.dark .header-category-btn,
+:root:not(.light) .header-category-btn {
+  background-color: hsl(var(--color-surface) / 0.55) !important;
+}
+
+.light .header-category-btn {
+  background-color: rgba(0, 0, 0, 0.04) !important;
+  border-color: rgba(0, 0, 0, 0.15) !important;
+  border-bottom-color: rgba(124, 58, 237, 0.25) !important;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .dark .header-category-btn:hover,
+  :root:not(.light) .header-category-btn:hover {
+    color: #f8fafc !important;
+  }
+
+  .light .header-category-btn:hover {
+    color: #5b21b6 !important;
+    background-color: rgba(124, 58, 237, 0.1) !important;
+  }
+}
+
+.header-category-btn.is-active {
+  border-bottom-color: hsl(var(--color-primary)) !important;
+  background-color: hsl(var(--color-primary) / 0.18) !important;
+  color: hsl(var(--color-primary)) !important;
+}
+
+.dark .header-category-btn.is-active,
+:root:not(.light) .header-category-btn.is-active {
   color: #f8fafc !important;
+  background-color: hsl(var(--color-primary) / 0.28) !important;
+}
+
+.light .header-category-btn.is-active {
+  color: #5b21b6 !important;
+  background-color: rgba(124, 58, 237, 0.14) !important;
+}
+
+.profile-menu-item {
+  border-radius: 12px;
+  border: 1px solid hsl(var(--color-muted) / 0.2);
+  margin-bottom: 6px;
+}
+
+.dark .profile-menu-item,
+:root:not(.light) .profile-menu-item {
+  background-color: hsl(var(--color-surface) / 0.45) !important;
+}
+
+.light .profile-menu-item {
+  background-color: rgba(0, 0, 0, 0.02) !important;
+  border-color: rgba(0, 0, 0, 0.12) !important;
+}
+
+/* Item detail modal — light theme */
+.light .menu-item-modal-backdrop {
+  background-color: rgba(15, 23, 42, 0.45) !important;
+}
+
+.light .menu-item-modal-panel {
+  background: hsl(var(--color-surface)) !important;
+  border-color: rgba(0, 0, 0, 0.08) !important;
+}
+
+.light .menu-item-modal-hero {
+  background: #f1f5f9 !important;
+}
+
+.light .menu-item-modal-hero-gradient {
+  display: none;
+}
+
+.light .menu-item-modal-close {
+  background: rgba(15, 23, 42, 0.82) !important;
+  border-color: rgba(255, 255, 255, 0.9) !important;
+  color: #ffffff !important;
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.45);
+}
+
+.menu-item-modal-close {
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.55);
+}
+
+.light .menu-item-modal-close:hover {
+  background: rgba(15, 23, 42, 0.92) !important;
+}
+
+/* Order detail item rows — lighter header in both themes */
+.order-detail-item-row {
+  background: hsl(var(--color-surface) / 0.35);
+  border: 1px solid hsl(var(--color-muted) / 0.12);
+}
+
+.light .order-detail-item-row {
+  background: rgba(0, 0, 0, 0.04) !important;
+  border-color: rgba(0, 0, 0, 0.08) !important;
+}
+
+.light .menu-item-modal-footer {
+  border-color: rgba(0, 0, 0, 0.08) !important;
+}
+
+/* Fix pending orders banner ugly gradient in light mode */
+.light .pending-orders-banner {
+  background: rgba(0, 0, 0, 0.04) !important;
+  border-color: rgba(0, 0, 0, 0.1) !important;
+}
+
+/* Explicit ignores for photos/modals */
+.light .dark-surface-ignore-theme .text-white,
+.light .dark-surface-ignore-theme.text-white {
+  color: #f8fafc !important;
+}
+
+.light .dark-surface-ignore-theme .text-muted {
+  color: #9ca3af !important;
 }
 
 /* Progressive image loading */
@@ -111,6 +311,7 @@ body {
   opacity: 0;
   transition: opacity 260ms ease-in;
 }
+
 .img-fade.is-loaded {
   opacity: 1;
 }

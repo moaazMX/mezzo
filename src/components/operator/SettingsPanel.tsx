@@ -8,14 +8,34 @@ import { deleteSlotBlob, getSlotBlob, saveSlotBlob } from '../../lib/slotStorage
 import { buildRateArchivePayload, downloadRateArchiveJson } from '../../lib/rateArchiveJson';
 import { getPolygonCenter } from '../../lib/geoUtils';
 
+export type SettingsPanelSection =
+  | 'site-interface'
+  | 'coupons'
+  | 'delivery'
+  | 'payment'
+  | 'security'
+  | 'slot-data'
+  | 'end-day'
+  | 'reset';
+
 type SettingsPanelProps = {
+  section?: SettingsPanelSection;
+  hideTitle?: boolean;
   onNavigateToCustomerOrders?: (phone: string, name?: string) => void;
   onNavigateToOrder?: (orderId: string, kind: 'live' | 'archive') => void;
   focusCustomerPhone?: string | null;
   focusCustomerToken?: number;
 };
 
-export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateToOrder, focusCustomerPhone, focusCustomerToken }: SettingsPanelProps) {
+export default function SettingsPanel({
+  section,
+  hideTitle = false,
+  onNavigateToCustomerOrders,
+  onNavigateToOrder,
+  focusCustomerPhone,
+  focusCustomerToken,
+}: SettingsPanelProps) {
+  const show = (s: SettingsPanelSection) => !section || section === s;
   const zoneCreateInFlightRef = useRef(false);
   const serviceCreateInFlightRef = useRef(false);
   const [instantNumber, setInstantNumber] = useState('');
@@ -2200,7 +2220,9 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
 
   return (
     <div className="space-y-6">
-      <h2 className="text-3xl font-black text-white text-right mb-6">الإعدادات</h2>
+      {!hideTitle && !section && (
+        <h2 className="text-3xl font-black text-white text-right mb-6">الإعدادات</h2>
+      )}
 
       {message && (
         <div className="fixed inset-x-0 bottom-4 z-[120] flex justify-center px-4 pointer-events-none">
@@ -2216,7 +2238,7 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
         </div>
       )}
 
-      {onNavigateToOrder && (
+      {!section && onNavigateToOrder && (
         <OperatorCustomerSearch
           onNavigateToOrder={onNavigateToOrder}
           onFocusOrdersByPhone={(phone) => onNavigateToCustomerOrders?.(phone)}
@@ -2226,7 +2248,7 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
         />
       )}
 
-      {/* Logo Upload Section */}
+      {show('site-interface') && (
       <div className="bg-gray-900/50 border-2 border-purple-500/30 rounded-xl p-6">
         <div className="flex items-center justify-end gap-2 mb-6">
           <h3 className="text-2xl font-bold text-white">صورة الشعار</h3>
@@ -2317,8 +2339,9 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
           </p>
         </div>
       </div>
+      )}
 
-      {/* Secret Coupon Settings */}
+      {show('coupons') && (
       <div className="bg-gray-900/50 border-2 border-purple-500/30 rounded-xl p-6">
         <div className="flex items-center justify-end gap-2 mb-6">
           <h3 className="text-2xl font-bold text-white">الشفرات السرية للكوبونات</h3>
@@ -2610,7 +2633,10 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
           </div>
         </div>
       </div>
+      )}
 
+      {show('delivery') && (
+      <>
       {/* Delivery Services Settings */}
       <div className="bg-gray-900/50 border-2 border-yellow-500/40 rounded-xl p-6">
         <div className="flex items-center justify-between mb-4 border-b border-yellow-500/20 pb-4">
@@ -2715,6 +2741,10 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
         />
       )}
 
+      </> 
+      )}
+
+      {show('payment') && (
       <div className="bg-gray-900/50 border-2 border-purple-500/30 rounded-xl p-6">
         <div className="flex items-center justify-end gap-2 mb-6">
           <h3 className="text-2xl font-bold text-white">رقم التحويل الفوري</h3>
@@ -2743,7 +2773,10 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
           </button>
         </div>
       </div>
+      )}
 
+      {show('security') && (
+      <>
       <div className="bg-gray-900/50 border-2 border-purple-500/30 rounded-xl p-6">
         <div className="flex items-center justify-end gap-2 mb-6">
           <h3 className="text-2xl font-bold text-white">تغيير كلمة المرور</h3>
@@ -2941,8 +2974,10 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
           </button>
         </div>
       </div>
+      </>
+      )}
 
-      {/* Slots (Export/Import/Restore) */}
+      {show('slot-data') && (
       <div className="bg-gray-900/50 border-2 border-purple-500/30 rounded-xl p-6">
         <div className="flex items-center justify-end gap-2 mb-6">
           <h3 className="text-2xl font-bold text-white">Slots (حفظ/استرجاع النظام)</h3>
@@ -3133,6 +3168,7 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
           )}
         </div>
       </div>
+      )}
 
       {slotGate && (
         <div className="fixed inset-0 bg-black/90 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
@@ -3180,7 +3216,7 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
         </div>
       )}
 
-      {/* End of Day / Archive */}
+      {show('end-day') && (
       <div className="bg-blue-900/20 border-2 border-blue-500/50 rounded-xl p-6">
         <div className="flex items-center justify-end gap-2 mb-6">
           <h3 className="text-2xl font-bold text-white">إنهاء اليوم - نقل إلى الأرشيف</h3>
@@ -3221,8 +3257,9 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
           </button>
         </div>
       </div>
+      )}
 
-      {/* Reset System */}
+      {show('reset') && (
       <div className="bg-red-900/20 border-2 border-red-500/50 rounded-xl p-6">
         <div className="flex items-center justify-end gap-2 mb-6">
           <h3 className="text-2xl font-bold text-white">إعادة تعيين البيانات</h3>
@@ -3258,6 +3295,7 @@ export default function SettingsPanel({ onNavigateToCustomerOrders, onNavigateTo
           </button>
         </div>
       </div>
+      )}
 
       {/* Archive Modal */}
       {showArchiveModal && (
